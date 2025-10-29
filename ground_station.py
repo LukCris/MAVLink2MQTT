@@ -134,7 +134,7 @@ def cli(c):
             elif cmd == "takeoff":
                 alt = float(parts[1])
                 info = publish_cmd(c, {"type": "takeoff", "alt": alt}, timeout=25)
-                print("[UAV] Takeoff completed")
+                print("[UAV] Starting takeoff")
             elif cmd == "move":
                 dir = str(parts[1])
                 speed = float(parts[2])
