@@ -1,7 +1,8 @@
 # gcs_mqtt_client.py
-import json, time, uuid, threading
+import time, uuid, threading, os, json, logging, logging.handlers
 from typing import Dict, Any, Optional
 import paho.mqtt.client as mqtt
+from datetime import datetime, timezone
 
 BROKER_HOST = "10.42.0.1"
 BROKER_PORT = 8883
@@ -17,20 +18,78 @@ KEY_FILE = "/etc/mosquitto/certs/gcs.key"
 
 _pending = {}  # command_id -> event/result
 
+LOG_DIR = os.environ.get("ML2MQTT_LOG_DIR", "./logs")
+os.makedirs(LOG_DIR, exist_ok=True)
+
+def _now_utc_iso():
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+
+class JsonFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        payload = {
+            "ts": _now_utc_iso(),
+            "lvl": record.levelname,
+            "logger": record.name,
+            "msg": record.getMessage(),
+        }
+        # porta dentro i campi passati via extra=
+        for k, v in getattr(record, "__dict__", {}).items():
+            if k in ("msg","args","levelname","levelno","pathname","filename","module",
+                     "exc_info","exc_text","stack_info","lineno","funcName","created",
+                     "msecs","relativeCreated","thread","threadName","processName",
+                     "process","name"):
+                continue
+            try:
+                json.dumps(v)
+                payload[k] = v
+            except Exception:
+                payload[k] = str(v)
+        return json.dumps(payload, ensure_ascii=False)
+
+def make_logger(name: str, filename: str) -> logging.Logger:
+    logger = logging.getLogger(name)
+    logger.setLevel(logging.INFO)
+    fh = logging.handlers.TimedRotatingFileHandler(
+        os.path.join(LOG_DIR, filename), when="midnight", backupCount=7, utc=True, encoding="utf-8"
+    )
+    ch = logging.StreamHandler()  # togli se non vuoi log in console
+    fmt = JsonFormatter()
+    fh.setFormatter(fmt); ch.setFormatter(fmt)
+    logger.handlers.clear()
+    logger.addHandler(fh); logger.addHandler(ch)
+    logger.propagate = False
+    return logger
+
+def log_json(logger: logging.Logger, event: str, **fields):
+    logger.info(event, extra=fields)
+
+
+LOGGER = make_logger("gcs", "gcs.log")
+NODE = "gcs"
+
+
 
 def _on_connect(c, u, f, rc):
     print(f"[MQTT] connected rc={rc}")
-    c.subscribe(TOPIC_ACK, qos=1)
+    log_json(LOGGER, "mqtt.connect", node=NODE, rc=rc, host=BROKER_HOST, port=BROKER_PORT, tls=USE_TLS)
+    r = c.subscribe(TOPIC_ACK, qos=1)
+    log_json(LOGGER, "mqtt.subscribe", node=NODE, topic=TOPIC_ACK, result=getattr(r[0], 'name', r[0]), mid=r[1])
 
 
 def _on_message(c, u, msg):
     try:
         payload = json.loads(msg.payload.decode("utf-8"))
         cid = payload.get("command_id")
+        log_json(LOGGER, "ack.receive", node=NODE, topic=msg.topic, command_id=cid,
+                 ok=payload.get("ok"), detail=payload.get("detail"),
+                 error=payload.get("error"), mode=payload.get("mode"),
+                 name=payload.get("name"), value=payload.get("value"))
         if cid and cid in _pending:
             _pending[cid] = payload
     except Exception as e:
         print("[ACK] parse error:", e)
+        log_json(LOGGER, "ack.parse_error", node=NODE, error=str(e),
+                 raw=msg.payload[:300].decode("utf-8","ignore"))
 
 
 def make_client() -> mqtt.Client:
@@ -44,16 +103,20 @@ def make_client() -> mqtt.Client:
             keyfile=KEY_FILE,
         )
     mqttc.connect(BROKER_HOST, BROKER_PORT, keepalive=30)
+    log_json(LOGGER, "mqtt.connecting", node=NODE, host=BROKER_HOST, port=BROKER_PORT, tls=USE_TLS)
     mqttc.loop_start()
     return mqttc
 
 
 def publish_cmd(client: mqtt.Client, payload: Dict[str, Any], await_ack: bool = True, timeout: float = 5.0) -> Optional[
     Dict[str, Any]]:
+
     cid = payload.setdefault("command_id", f"cmd-{uuid.uuid4().hex[:8]}")
     data = json.dumps(payload, separators=(",", ":"))
+    log_json(LOGGER, "cmd.publish", node=NODE, topic=TOPIC_CMD, command_id=cid, body=payload)
     info = client.publish(TOPIC_CMD, data, qos=QOS_CMD, retain=False)
     info.wait_for_publish()
+    log_json(LOGGER, "cmd.published", node=NODE, topic=TOPIC_CMD, command_id=cid, mid=getattr(info,"mid",None))
     print(f"[GCS→MQTT] {TOPIC_CMD} {data}")
     if not await_ack:
         return None
@@ -61,23 +124,25 @@ def publish_cmd(client: mqtt.Client, payload: Dict[str, Any], await_ack: bool = 
     t0 = time.time()
     while time.time() - t0 < timeout:
         if _pending[cid] is not None:
-            return _pending.pop(cid)
+            res = _pending.pop(cid)
+            log_json(LOGGER, "cmd.ack_received", node=NODE, command_id=cid, ack=res)
+            return res
         time.sleep(0.05)
-    return _pending.pop(cid)  # None se timeout
+    res = _pending.pop(cid)
+    log_json(LOGGER, "cmd.ack_timeout", node=NODE, command_id=cid)
+    return res  # None se timeout
 
 
 HELP = """
 Comandi disponibili:
 
 SYSTEM / MODE
-  connect [<link>]            # predef: 127.0.0.1:14550
   guided                      # mode GUIDED
   arm                         # arma (in GUIDED)
   disarm
   takeoff <alt_m>
   land                        # mode LAND
   rtl                         # mode RTL
-  reboot                      # riavvia l'autopilota
 
 MOVE (NED)
   move <dir> <speed_mps> <distance_m>    # dir: north|south|east|west|up|down
@@ -87,19 +152,8 @@ MOVE (NED)
   goto <lat> <lon> <alt_m>
 
 PARAM / STATUS
-  pshow <NAME>
-  pset <NAME> <VALUE>
-  status
-  alt
+  get <NAME>
   batt
-
-BATTERY (SITL)
-  batt_full             # SIM_BATT_CAPACITY=100, SIM_BATT_VOLTAGE=12.6 (es. 3S)
-  batt_set <pct> <volt> # imposta percentuale e voltaggio
-
-ALTRO
-  help
-  quit / exit
 """
 
 
