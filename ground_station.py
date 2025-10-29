@@ -52,11 +52,10 @@ def make_logger(name: str, filename: str) -> logging.Logger:
     fh = logging.handlers.TimedRotatingFileHandler(
         os.path.join(LOG_DIR, filename), when="midnight", backupCount=7, utc=True, encoding="utf-8"
     )
-    ch = logging.StreamHandler()  # togli se non vuoi log in console
     fmt = JsonFormatter()
-    fh.setFormatter(fmt); ch.setFormatter(fmt)
+    fh.setFormatter(fmt)
     logger.handlers.clear()
-    logger.addHandler(fh); logger.addHandler(ch)
+    logger.addHandler(fh)
     logger.propagate = False
     return logger
 

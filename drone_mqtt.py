@@ -80,11 +80,10 @@ def make_logger(name: str, filename: str) -> logging.Logger:
     fh = logging.handlers.TimedRotatingFileHandler(
         os.path.join(LOG_DIR, filename), when="midnight", backupCount=7, utc=True, encoding="utf-8"
     )
-    ch = logging.StreamHandler()  # togli se non vuoi log in console
     fmt = JsonFormatter()
-    fh.setFormatter(fmt); ch.setFormatter(fmt)
+    fh.setFormatter(fmt)
     logger.handlers.clear()
-    logger.addHandler(fh); logger.addHandler(ch)
+    logger.addHandler(fh)
     logger.propagate = False
     return logger
 
@@ -332,10 +331,10 @@ def handle_command(p: Dict[str, Any]):
 # Telemetria
 # ---------------------------
 def telemetry_loop():
-    last_hb_log = 0.0          # snapshot stato (mode/armed) ogni 5s
-    last_bat_log = 0.0         # snapshot batteria ogni 10s
-    HB_LOG_EVERY  = 5.0
-    BAT_LOG_EVERY = 10.0
+    last_hb_log = 0.0          # snapshot stato (mode/armed) ogni 15s
+    last_bat_log = 0.0         # snapshot batteria ogni 15s
+    HB_LOG_EVERY  = 15.0
+    BAT_LOG_EVERY = 15.0
 
     while running and vehicle is not None:
         try:
