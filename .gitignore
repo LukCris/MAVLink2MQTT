@@ -9,3 +9,4 @@ __pycache__/
 *.log
 
 .idea/
+"@ | Out-File -FilePath .gitignore -Encoding utf8 -NoNewline
