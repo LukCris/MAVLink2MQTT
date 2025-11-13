@@ -63,6 +63,15 @@ def batt_printer(prompt: str = "sitl> "):
             break
         safe_print(msg, prompt=prompt)
 
+def qos_retriever(args):
+    if "-q" in args:
+        idx = args.index("-q")
+        if int(args[idx+1]) != QOS_CMD:
+            qos = int(args[idx+1])
+        else:
+            print(f"[UAV] QoS is actually setted to {QOS_CMD}")
+    return qos
+
 
 # ---------------------------
 # Logging
@@ -211,22 +220,22 @@ HELP = """
 Comandi disponibili:
 
 SYSTEM / MODE
-  guided                      # mode GUIDED
-  arm                         # arma (in GUIDED)
-  disarm
-  takeoff <alt_m>
-  land                        # mode LAND
-  rtl                         # mode RTL
+  guided [-q 0|1|2]                  # mode GUIDED
+  arm [-q 0|1|2]                     # arma (in GUIDED)
+  disarm [-q 0|1|2]
+  takeoff <alt_m> [-q 0|1|2]
+  land [-q 0|1|2]                    # mode LAND
+  rtl  [-q 0|1|2]                    # mode RTL
 
 MOVE (NED)
-  move <dir> <speed_mps> <distance_m>    # dir: north|south|east|west|up|down
-  vel <vx> <vy> <vz> <duration_s>
-  yaw <heading_deg> [rate_deg_s=30] [relative=0|1] [cw=1|0]
-  setspeed <mps>
-  goto <lat> <lon> <alt_m>
+  move <dir> <speed_mps> <distance_m> [-q 0|1|2]   # dir: north|south|east|west|up|down
+  vel <vx> <vy> <vz> <duration_s> [-q 0|1|2]
+  yaw <heading_deg> [rate_deg_s=30] [relative=0|1] [cw=1|0] [-q 0|1|2]
+  setspeed <mps> [-q 0|1|2]
+  goto <lat> <lon> <alt_m> [-q 0|1|2]
 
 PARAM / STATUS
-  batt
+  batt [-q 0|1|2]
 """
 
 # ---------------------------
@@ -253,88 +262,96 @@ def cli(c):
             if cmd == "help":
                 print(HELP)
             elif cmd == "guided":
-                qos = parts[1] if len(parts) > 2 else None
-                if qos and int(parts[2]) != QOS_CMD:
-                    qos_level = int(parts[2])
+                qos_level = qos_retriever(parts[1:])
                 publish_cmd(c, {"type": "mode", "mode": "GUIDED"}, qos=qos_level)
                 print("[UAV] Mode GUIDED")
             elif cmd == "arm":
-                qos = parts[1] if len(parts) > 2 else None
-                if qos and int(parts[2]) != QOS_CMD:
-                    qos_level = int(parts[2])
+                qos_level = qos_retriever(parts[1:])
                 publish_cmd(c, {"type": "arm", "arm": True}, qos=qos_level)
                 print("[UAV] ARMED")
             elif cmd == "disarm":
-                qos = parts[1] if len(parts) > 2 else None
-                if qos and int(parts[2]) != QOS_CMD:
-                    qos_level = int(parts[2])
+                qos_level = qos_retriever(parts[1:])
                 publish_cmd(c, {"type": "arm", "arm": False}, qos=qos_level)
                 print("[UAV] DISARMED")
             elif cmd == "takeoff":
-                qos = parts[2] if len(parts) > 3 else None
-                if qos and int(parts[3]) != QOS_CMD:
-                    qos_level = int(parts[3])
+                qos_level = qos_retriever(parts[1:])
                 alt = float(parts[1])
                 info = publish_cmd(c, {"type": "takeoff", "alt": alt}, timeout=25, qos=qos_level)
-                print("[UAV] Starting takeoff")
+                print("[UAV] Takeoff")
             elif cmd == "move":
-                qos = parts[4] if len(parts) > 5 else None
-                if qos and int(parts[5]) != QOS_CMD:
-                    qos_level = int(parts[5])
+                qos_level = qos_retriever(parts[1:])
                 dir = str(parts[1])
                 speed = float(parts[2])
                 dist = float(parts[3])
                 publish_cmd(c, {"type": "move", "direction": dir, "speed": speed, "distance": dist}, qos=qos_level)
                 print("[UAV] Move set")
             elif cmd == "vel":
-                qos = parts[5] if len(parts) > 6 else None
-                if qos and int(parts[6]) != QOS_CMD:
-                    qos_level = int(parts[6])
+                qos_level = qos_retriever(parts[1:])
                 vx, vy, vz, dur = map(float, parts[1:5])
                 publish_cmd(c, {"type": "velocity", "vx": vx, "vy": vy, "vz": vz, "duration": dur}, qos=qos_level)
                 print("[UAV] Velocity set")
             elif cmd == "yaw":
-                # COMANDO PROBLEMATICO PER LA PARTE DEL QOS
-                heading = float(parts[1])
-                rate = float(parts[2]) if len(parts) > 2 else 30.0
-                relative = bool(int(parts[3])) if len(parts) > 3 else False
-                cw = bool(int(parts[4])) if len(parts) > 4 else True
-                publish_cmd(c, {"type": "yaw", "heading": heading, "rate": rate, "relative": relative, "cw": cw})
+                args = parts[1:]
+
+                # Parse opzionale -q <n> ovunque dopo il comando
+                if "-q" in args:
+                    idx = args.index("-q")
+                    try:
+                        qos_level = int(args[idx + 1])
+                    except (IndexError, ValueError):
+                        print("[ERROR] yaw: missing or invalid QoS after -q")
+                        continue
+                    # rimuovi '-q' e il valore corrispondente dalla lista argomenti
+                    del args[idx:idx + 2]
+
+                if not args:
+                    print("[ERROR] yaw: heading required")
+                    continue
+
+                try:
+                    heading = float(args[0])
+                    rate = float(args[1]) if len(args) > 1 else 30.0
+                    relative = bool(int(args[2])) if len(args) > 2 else False
+                    cw = bool(int(args[3])) if len(args) > 3 else True
+                except ValueError as e:
+                    print(f"[ERROR] yaw: invalid argument: {e}")
+                    continue
+
+                publish_cmd(
+                    c,
+                    {
+                        "type": "yaw",
+                        "heading": heading,
+                        "rate": rate,
+                        "relative": relative,
+                        "cw": cw,
+                    },
+                    qos=qos_level,
+                )
                 print("[UAV] Yaw set")
             elif cmd == "setspeed":
-                qos = parts[2] if len(parts) > 3 else None
-                if qos and int(parts[3]) != QOS_CMD:
-                    qos_level = int(parts[3])
+                qos_level = qos_retriever(parts[1:])
                 speed = float(parts[1])
                 publish_cmd(c, {"type": "setspeed", "speed": speed}, qos=qos_level)
                 print(f"[UAV] Set speed: {speed}")
             elif cmd == "goto":
-                qos = parts[4] if len(parts) > 5 else None
-                if qos and int(parts[5]) != QOS_CMD:
-                    qos_level = int(parts[5])
+                qos_level = qos_retriever(parts[1:])
                 lat = float(parts[1])
                 lon = float(parts[2])
                 alt = float(parts[3])
                 publish_cmd(c, {"type": "goto", "lat": lat, "lon": lon, "alt": alt}, qos=qos_level)
             elif cmd == "rtl":
-                qos = parts[1] if len(parts) > 2 else None
-                if qos and int(parts[2]) != QOS_CMD:
-                    qos_level = int(parts[2])
+                qos_level = qos_retriever(parts[1:])
                 info = publish_cmd(c, {"type": "mode", "mode": "RTL"}, qos=qos_level)
                 mode = info.get("mode")
                 print(f"[UAV] Mode {mode}")
             elif cmd == "land":
-                qos = parts[1] if len(parts) > 2 else None
-                if qos and int(parts[2]) != QOS_CMD:
-                    qos_level = int(parts[2])
+                qos_level = qos_retriever(parts[1:])
                 info = publish_cmd(c, {"type": "mode", "mode": "LAND"}, qos=qos_level)
                 mode = info.get("mode")
                 print(f"[UAV] Mode {mode}")
             elif cmd == "batt":
-                qos = parts[1] if len(parts) > 2 else None
-                print(qos)
-                if qos and int(parts[2]) != QOS_CMD:
-                    qos_level = int(parts[2])
+                qos_level = qos_retriever(parts[1:])
                 info = publish_cmd(c, {"type": "batt"}, qos=qos_level)
                 volt = info.get("voltage")
                 curr = info.get("current")
