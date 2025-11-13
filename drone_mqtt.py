@@ -14,9 +14,9 @@ USE_TLS = True
 UAV_ID = "uav1"
 CLIENT_ID = f"drone-bridge-{uuid.uuid4()}"
 
-CERT_CA = "/home/ubuntu-sitl/.certs/ca.crt"
-CERT_FILE = "/home/ubuntu-sitl/.certs/drone.crt"
-KEY_FILE = "/home/ubuntu-sitl/.certs/drone.key"
+CERT_CA = "/etc/mosquitto/ca_certificates/ca.crt"
+CERT_FILE = "/etc/mosquitto/certs/drone.crt"
+KEY_FILE = "/etc/mosquitto/certs/drone.key"
 
 TOPIC_CMD = f"uav/{UAV_ID}/cmd"
 TOPIC_ACK = f"uav/{UAV_ID}/ack"
@@ -43,7 +43,6 @@ running = True
 LOG_DIR = os.environ.get("ML2MQTT_LOG_DIR", "./logs")
 os.makedirs(LOG_DIR, exist_ok=True)
 NODE = "drone"
-
 
 
 # ---------------------------
@@ -365,12 +364,6 @@ def telemetry_loop():
                 )
 
             bat = vehicle.battery
-            if bat:
-                mqtt_client.publish(
-                    TOPIC_TEL_BAT,
-                    json.dumps({"voltage": bat.voltage, "current": bat.current, "level": bat.level}),
-                    qos=QOS_TEL,
-                )
 
             # --- Logging su file ---
             now = time.time()
@@ -382,6 +375,12 @@ def telemetry_loop():
 
             # **Batteria ogni 10s**
             if bat and (now - last_bat_log >= BAT_LOG_EVERY):
+                mqtt_client.publish(
+                    TOPIC_TEL_BAT,
+                    json.dumps({"voltage": bat.voltage, "current": bat.current, "level": bat.level}),
+                    qos=QOS_TEL,
+                )
+
                 # Valori possono essere None: normalizza a tipi serializzabili
                 v = None if getattr(bat, "voltage", None) is None else float(bat.voltage)
                 c = None if getattr(bat, "current", None) is None else float(bat.current)
@@ -432,7 +431,7 @@ def main():
             mqtt_client.publish(TOPIC_STATUS, "offline", qos=1, retain=True)
         except:
             pass
-        mqtt_client.loop_stop();
+        mqtt_client.loop_stop()
         mqtt_client.disconnect()
         try:
             vehicle.close()
