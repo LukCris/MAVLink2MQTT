@@ -1,11 +1,13 @@
-# drone_mqtt_bridge.py
+# drone_mqtt.py
 from __future__ import annotations
-import base64, json, threading, time, uuid, os, logging, logging.handlers
+import base64, json, threading, time, uuid
 from typing import Any, Dict
 import paho.mqtt.client as mqtt
 from dronekit import connect, VehicleMode, LocationGlobalRelative
 from pymavlink import mavutil
 from datetime import datetime, timezone
+
+from metrics_logger import init_battery_logger, log_battery
 
 # --- Config MQTT ---
 BROKER_HOST = "10.42.0.1"
@@ -21,10 +23,9 @@ KEY_FILE = "/etc/mosquitto/certs/drone.key"
 TOPIC_CMD = f"uav/{UAV_ID}/cmd"
 TOPIC_ACK = f"uav/{UAV_ID}/ack"
 TOPIC_STATUS = f"uav/{UAV_ID}/status"
-TOPIC_TEL_HB = f"uav/{UAV_ID}/telemetry/heartbeat"
-TOPIC_TEL_POS = f"uav/{UAV_ID}/telemetry/global_position"
-TOPIC_TEL_ATT = f"uav/{UAV_ID}/telemetry/attitude"
 TOPIC_TEL_BAT = f"uav/{UAV_ID}/telemetry/battery"
+TOPIC_LAT_REQ = f"uav/{UAV_ID}/latency/request"
+TOPIC_LAT_RES = f"uav/{UAV_ID}/latency/response"
 
 # opzionale pass-through grezzo
 TOPIC_MAV_TX = f"uav/{UAV_ID}/mav/tx"  # GCS→DRONE (raw base64)
@@ -39,58 +40,63 @@ vehicle = None
 mqtt_client = None
 running = True
 
-# --- Config logging ---
-LOG_DIR = os.environ.get("ML2MQTT_LOG_DIR", "./logs")
-os.makedirs(LOG_DIR, exist_ok=True)
-NODE = "drone"
-
-
 # ---------------------------
-# Logging
+# Metrics
 # ---------------------------
-def _now_utc_iso():
-    return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+def on_latency_request(client, userdata, msg):
+    data = json.loads(msg.payload.decode())
+    client.publish(TOPIC_LAT_RES, json.dumps(data), qos=0, retain=False)
 
-class JsonFormatter(logging.Formatter):
-    def format(self, record: logging.LogRecord) -> str:
-        payload = {
-            "ts": _now_utc_iso(),
-            "lvl": record.levelname,
-            "logger": record.name,
-            "msg": record.getMessage(),
-        }
-        # porta dentro i campi passati via extra=
-        for k, v in getattr(record, "__dict__", {}).items():
-            if k in ("msg","args","levelname","levelno","pathname","filename","module",
-                     "exc_info","exc_text","stack_info","lineno","funcName","created",
-                     "msecs","relativeCreated","thread","threadName","processName",
-                     "process","name"):
-                continue
-            try:
-                json.dumps(v)
-                payload[k] = v
-            except Exception:
-                payload[k] = str(v)
-        return json.dumps(payload, ensure_ascii=False)
+_last_batt_timestamp = None
+_mah_consumed = 0.0   # mAh totali integrati
 
-def make_logger(name: str, filename: str) -> logging.Logger:
-    logger = logging.getLogger(name)
-    logger.setLevel(logging.INFO)
-    fh = logging.handlers.TimedRotatingFileHandler(
-        os.path.join(LOG_DIR, filename), when="midnight", backupCount=7, utc=True, encoding="utf-8"
-    )
-    fmt = JsonFormatter()
-    fh.setFormatter(fmt)
-    logger.handlers.clear()
-    logger.addHandler(fh)
-    logger.propagate = False
-    return logger
+def process_battery_msg(current_A):
+    """
+    Integra la corrente misurata dal flight controller per calcolare
+    i milliampere-ora (mAh) consumati.
 
-def log_json(logger: logging.Logger, event: str, **fields):
-    logger.info(event, extra=fields)
+    current_A: corrente istantanea in Ampere (float)
+    """
 
-LOGGER = make_logger("drone", "drone.log")
+    global _last_batt_timestamp, _mah_consumed
 
+    # Timestamp corrente in secondi
+    t_now = time.time()
+
+    # Se non abbiamo ancora un timestamp precedente, inizializziamo e non calcoliamo nulla.
+    if _last_batt_timestamp is None:
+        _last_batt_timestamp = t_now
+        return _mah_consumed   # 0 la prima volta
+
+    # Calcolo dell'intervallo di tempo Δt
+    # Tempo trascorso in secondi dall’ultima lettura
+    delta_t_s = t_now - _last_batt_timestamp
+
+    # Aggiornamento timestamp
+    _last_batt_timestamp = t_now
+
+    # Integrazione della corrente. Formula:
+    #   mAh = I(A) * (t_sec / 3600) * 1000
+    #  - dividiamo per 3600 per convertire i secondi in ore
+    #  - moltiplichiamo per 1000 per passare da Ah a mAh
+    mah_increment = current_A * (delta_t_s / 3600.0) * 1000.0
+
+    # Accumuliamo il consumo totale
+    _mah_consumed += mah_increment
+
+    return _mah_consumed
+
+
+def setup_battery_logging(vehicle):
+    init_battery_logger()
+
+    @vehicle.on_message('SYS_STATUS')
+    def listener(self, name, msg):
+        voltage_V = msg.voltage_battery / 1000.0 if msg.voltage_battery != 0xFFFF else None
+        current_A = msg.current_battery / 100.0 if msg.current_battery != 0xFFFF else None
+        mah_consumed = process_battery_msg(current_A)
+        remaining = msg.battery_remaining if msg.battery_remaining != 0xFF else None
+        log_battery(voltage_V, current_A, remaining_pct=remaining, mah_consumed=mah_consumed)
 
 
 # ---------------------------
@@ -104,52 +110,42 @@ def _ack(command_id: str | None, ok: bool, **extra):
 
 
 def set_mode(mode: str):
-    log_json(LOGGER, "action.set_mode", node=NODE, mode=mode)
+    #log_json(LOGGER, "action.set_mode", node=NODE, mode=mode)
     vehicle.mode = VehicleMode(mode)
     t0 = time.time()
     while time.time() - t0 < 6:
         if vehicle.mode.name.upper() == mode.upper():
-            log_json(LOGGER, "action.set_mode_ok", node=NODE, mode=mode)
             return True
         time.sleep(0.1)
-    log_json(LOGGER, "action.set_mode_timeout", node=NODE, mode=mode)
     return False
 
 
 def arm_disarm(arm: bool):
-    log_json(LOGGER, "action.arm_disarm", node=NODE, arm=arm)
     vehicle.armed = arm
     t0 = time.time()
     while time.time() - t0 < 8:
         if bool(vehicle.armed) == arm:
-            log_json(LOGGER, "action.arm_disarm_ok", node=NODE, arm=arm)
             return True
         time.sleep(0.2)
-    log_json(LOGGER, "action.arm_disarm_timeout", node=NODE, arm=arm)
     return False
 
 
 def takeoff(alt: float):
-    log_json(LOGGER, "action.takeoff", node=NODE, alt=alt)
     if vehicle.mode.name.upper() != "GUIDED":
         if not set_mode("GUIDED"):
-            log_json(LOGGER, "action.takeoff_fail_mode", node=NODE)
             return False
     if not vehicle.armed:
         if not arm_disarm(True):
-            log_json(LOGGER, "action.takeoff_fail_arm", node=NODE)
             return False
     vehicle.simple_takeoff(alt)
     while True:
         a = vehicle.location.global_relative_frame.alt or 0.0
         if a >= 0.95 * alt: break
         time.sleep(0.5)
-    log_json(LOGGER, "action.takeoff_ok", node=NODE)
     return True
 
 
 def send_velocity_ned(vx: float, vy: float, vz: float, duration: float):
-    log_json(LOGGER, "action.velocity", node=NODE)
     msg = vehicle.message_factory.set_position_target_local_ned_encode(
         0, 0, 0,
         mavutil.mavlink.MAV_FRAME_LOCAL_NED,
@@ -163,12 +159,10 @@ def send_velocity_ned(vx: float, vy: float, vz: float, duration: float):
     while time.time() - t0 < duration:
         vehicle.send_mavlink(msg)
         time.sleep(0.2)
-    log_json(LOGGER, "action.velocity_ok", node=NODE)
     return True
 
 
 def move_direction_by_distance(direction: str, speed: float, distance: float):
-    log_json(LOGGER, "action.move_direction", node=NODE)
     if speed <= 0: raise ValueError("speed must be > 0")
     dur = distance / speed
     d = direction.lower()
@@ -186,14 +180,11 @@ def move_direction_by_distance(direction: str, speed: float, distance: float):
     elif d == "down":
         vz = speed
     else:
-        log_json(LOGGER, "action.move_direction_fail_comm", node=NODE)
         raise ValueError("direction must be north/south/east/west/up/down")
-    log_json(LOGGER, "action.move_direction_ok", node=NODE)
     return send_velocity_ned(vx, vy, vz, dur)
 
 
 def set_yaw(heading: float, rate: float = 30.0, relative: bool = False, cw: bool = True):
-    log_json(LOGGER, "action.set_yaw", node=NODE)
     is_relative = 1 if relative else 0
     direction = 1 if cw else -1
     msg = vehicle.message_factory.command_long_encode(
@@ -205,23 +196,18 @@ def set_yaw(heading: float, rate: float = 30.0, relative: bool = False, cw: bool
     )
     vehicle.send_mavlink(msg)
     vehicle.flush()
-    log_json(LOGGER, "action.set_yaw_ok", node=NODE)
     return True
 
 
 def set_speed(spd: float):
-    log_json(LOGGER, "action.set_speed", node=NODE)
     vehicle.airspeed = spd
     vehicle.groundspeed = spd
-    log_json(LOGGER, "action.set_speed_ok", node=NODE)
     return True
 
 
 def goto_absolute(lat: float, lon: float, alt: float):
-    log_json(LOGGER, "action.goto", node=NODE)
     tgt = LocationGlobalRelative(lat, lon, alt)
     vehicle.simple_goto(tgt)
-    log_json(LOGGER, "action.goto_ok", node=NODE)
     return True
 
 
@@ -239,43 +225,33 @@ def get_param(name: str):
 # ---------------------------
 def on_connect(client, userdata, flags, rc):
     print(f"[MQTT] Connected rc={rc} host={BROKER_HOST} port={BROKER_PORT}")
-    log_json(LOGGER, "mqtt.connect", node=NODE, rc=rc, host=BROKER_HOST, port=BROKER_PORT, tls=USE_TLS)
     client.publish(TOPIC_STATUS, "online", qos=1, retain=True)
-    r1 = client.subscribe(TOPIC_CMD, qos=QOS_CMD)
-    log_json(LOGGER, "mqtt.subscribe", node=NODE, topic=TOPIC_CMD, result=getattr(r1[0], 'name', r1[0]), mid=r1[1])
-    r2 = client.subscribe(TOPIC_MAV_TX, qos=0)
-    log_json(LOGGER, "mqtt.subscribe", node=NODE, topic=TOPIC_MAV_TX, result=getattr(r2[0], 'name', r2[0]), mid=r2[1])
+    client.subscribe(TOPIC_CMD, qos=QOS_CMD)
+    client.subscribe(TOPIC_MAV_TX, qos=0)
+    client.subscribe(TOPIC_LAT_REQ, qos=1)
 
 
 def on_disconnect(client, userdata, rc):
     print(f"[MQTT] Disconnected rc={rc}")
-    log_json(LOGGER, "mqtt.disconnect", node=NODE, rc=rc)
 
 
 def on_message(client, userdata, msg):
     print(f"[MQTT] RX topic={msg.topic} payload={msg.payload[:120]!r}")
-    log_json(LOGGER, "mqtt.rx", node=NODE, topic=msg.topic,
-             payload=msg.payload[:500].decode("utf-8", "ignore"))
     if msg.topic == TOPIC_MAV_TX:
         try:
             raw = base64.b64decode(msg.payload)
             vehicle._master.write(raw)
-            log_json(LOGGER, "mav.raw_applied", node=NODE, size=len(raw))
         except Exception as e:
             print("[RAW] write failed:", e)
-            log_json(LOGGER, "mav.raw_error", node=NODE, error=str(e))
         return
     # comandi JSON
     try:
         p = json.loads(msg.payload.decode("utf-8"))
         cid = p.get("command_id")
-        log_json(LOGGER, "cmd.receive", node=NODE, command_id=cid, body=p)
         ok, detail = handle_command(p)
         _ack(cid, ok, **detail)
-        log_json(LOGGER, "cmd.done", node=NODE, command_id=cid, ok=ok, **detail)
     except Exception as e:
         print("[CMD] error:", e)
-        log_json(LOGGER, "cmd.error", node=NODE, error=str(e))
 
 
 def handle_command(p: Dict[str, Any]):
@@ -337,64 +313,22 @@ def telemetry_loop():
 
     while running and vehicle is not None:
         try:
-            # Heartbeat
-            hb = {
-                "armed": bool(vehicle.armed),
-                "mode": vehicle.mode.name if vehicle.mode else None,
-                "sys_status": getattr(vehicle.system_status, "state", None),
-            }
-            # Pubblicazione MQTT (frequente)
-            mqtt_client.publish(TOPIC_TEL_HB, json.dumps(hb), qos=QOS_TEL)
-
-            # Posizione, assetto, batteria su MQTT
-            loc = vehicle.location.global_relative_frame
-            if loc:
-                mqtt_client.publish(
-                    TOPIC_TEL_POS,
-                    json.dumps({"lat": loc.lat, "lon": loc.lon, "alt": loc.alt}),
-                    qos=QOS_TEL,
-                )
-
-            att = vehicle.attitude
-            if att:
-                mqtt_client.publish(
-                    TOPIC_TEL_ATT,
-                    json.dumps({"roll": att.roll, "pitch": att.pitch, "yaw": att.yaw}),
-                    qos=QOS_TEL,
-                )
-
             bat = vehicle.battery
-
-            # --- Logging su file ---
             now = time.time()
 
-            # Stato base ogni 5s
-            if now - last_hb_log >= HB_LOG_EVERY:
-                log_json(LOGGER, "tel.hb", node=NODE, **hb)
-                last_hb_log = now
-
-            # **Batteria ogni 10s**
+            # Batteria ogni 10s
             if bat and (now - last_bat_log >= BAT_LOG_EVERY):
                 mqtt_client.publish(
                     TOPIC_TEL_BAT,
                     json.dumps({"voltage": bat.voltage, "current": bat.current, "level": bat.level}),
                     qos=QOS_TEL,
                 )
-
-                # Valori possono essere None: normalizza a tipi serializzabili
-                v = None if getattr(bat, "voltage", None) is None else float(bat.voltage)
-                c = None if getattr(bat, "current", None) is None else float(bat.current)
-                l = None if getattr(bat, "level",   None) is None else int(bat.level)
-                log_json(LOGGER, "tel.battery", node=NODE, voltage=v, current=c, level=l)
                 last_bat_log = now
 
-            time.sleep(0.5)  # frequenza pubblicazione MQTT
-
+            time.sleep(0.5)
         except Exception as e:
             print("[TEL] error:", e)
-            log_json(LOGGER, "tel.error", node=NODE, error=str(e))
             time.sleep(1.0)
-
 
 
 # ---------------------------
@@ -405,7 +339,7 @@ def main():
     print(f"[DRONE] Connecting SITL {SITL_LINK} ...")
     vehicle = connect(SITL_LINK, wait_ready=True, timeout=60)
     print("[DRONE] Vehicle connected.")
-    log_json(LOGGER, "sitl.connect", node=NODE, link=SITL_LINK)
+    setup_battery_logging(vehicle)
     mqtt_client = mqtt.Client(client_id=CLIENT_ID, clean_session=True)
     mqtt_client.will_set(TOPIC_STATUS, "offline", qos=1, retain=True)
     mqtt_client.on_connect = on_connect
@@ -418,6 +352,7 @@ def main():
             keyfile=KEY_FILE,
         )
         pass
+    mqtt_client.message_callback_add(TOPIC_LAT_REQ, on_latency_request)
     mqtt_client.connect(BROKER_HOST, BROKER_PORT, keepalive=30)
     mqtt_client.loop_start()
     threading.Thread(target=telemetry_loop, daemon=True).start()

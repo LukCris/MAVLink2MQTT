@@ -1,8 +1,14 @@
-# gcs_mqtt_client.py
-import time, uuid, threading, os, json, logging, logging.handlers, sys, queue
+# gcs_station.py
+import time, uuid, threading, os, json, sys, queue, itertools
 from typing import Dict, Any, Optional
 import paho.mqtt.client as mqtt
 from datetime import datetime, timezone
+
+from metrics_logger import (
+    init_link_logger, log_link_event,
+    init_latency_logger, record_latency_request,
+    record_latency_response, record_latency_timeout
+)
 
 try:
     import readline  # su Linux/Unix è disponibile; su Windows potrebbe mancare
@@ -14,8 +20,11 @@ BROKER_PORT = 8883
 USE_TLS = True
 UAV_ID = "uav1"
 TOPIC_CMD = f"uav/{UAV_ID}/cmd"
-TOPIC_BATT = f"uav/{UAV_ID}/telemetry/battery"  # QUA VENGONO PUBBLICATE LE INFO SULLA BATTERIA DAL DRONE
+TOPIC_STATUS = f"uav/{UAV_ID}/status"
+TOPIC_BATT = f"uav/{UAV_ID}/telemetry/battery"
 TOPIC_ACK = f"uav/{UAV_ID}/ack"
+TOPIC_LAT_REQ = f"uav/{UAV_ID}/latency/request"
+TOPIC_LAT_RES = f"uav/{UAV_ID}/latency/response"
 QOS_CMD = 1
 
 CERT_CA = "./certs/ca.crt"
@@ -24,11 +33,69 @@ KEY_FILE = "./certs/client.key"
 
 _pending = {}  # command_id -> event/result
 
-batt_q: "queue.Queue[str]" = queue.Queue()
+q: "queue.Queue[str]" = queue.Queue()
 last_batt = {"voltage": None, "current": None, "level": None}
 
 LOG_DIR = os.environ.get("ML2MQTT_LOG_DIR", "./logs")
 os.makedirs(LOG_DIR, exist_ok=True)
+
+# ---------------------------
+# Metrics
+# ---------------------------
+PING_INTERVAL = 1.0  # secondi
+PING_TIMEOUT = 2.0  # quanto aspetti la risposta
+
+latency_counter = itertools.count(1)
+_pending_pings = {}  # msg_id -> t_send_ns
+
+init_link_logger()
+init_latency_logger()
+
+
+def latency_ping_loop(client: mqtt.Client, stop_event: threading.Event):
+    while not stop_event.is_set():
+        msg_id = next(latency_counter)
+        t_send_ns = time.time_ns()
+        payload = json.dumps({"id": msg_id, "t_send_ns": t_send_ns})
+
+        # registra la richiesta in sospeso
+        _pending_pings[msg_id] = t_send_ns
+
+        # log lato "request"
+        record_latency_request(msg_id, t_send_ns)
+
+        client.publish(TOPIC_LAT_REQ, payload, qos=0, retain=False)
+        time.sleep(PING_INTERVAL)
+
+
+def on_latency_response(client, userdata, msg):
+    data = json.loads(msg.payload.decode())
+    msg_id = data["id"]
+    t_recv_ns = time.time_ns()
+
+    t_send_ns = _pending_pings.pop(msg_id, None)
+    if t_send_ns is None:
+        # risposta di un ping non registrato o già scaduto
+        return
+
+    # log RTT
+    record_latency_response(msg_id, t_recv_ns, t_send_ns)
+
+
+def latency_timeout_loop(stop_event: threading.Event):
+    while not stop_event.is_set():
+        now_ns = time.time_ns()
+        to_delete = []
+        for msg_id, t_send_ns in list(_pending_pings.items()):
+            dt_s = (now_ns - t_send_ns) / 1e9
+            if dt_s > PING_TIMEOUT:
+                # logga come perso
+                record_latency_timeout(msg_id, t_send_ns)
+                to_delete.append(msg_id)
+        for msg_id in to_delete:
+            _pending_pings.pop(msg_id, None)
+        time.sleep(0.5)
+
 
 # ---------------------------
 # Utils
@@ -36,10 +103,10 @@ os.makedirs(LOG_DIR, exist_ok=True)
 def _now_utc_iso():
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 
+
 def safe_print(line: str, prompt: str = "sitl> "):
     """
     Stampa una riga senza spezzare ciò che l'utente sta digitando.
-    Funziona meglio se è presente 'readline'.
     """
     if readline:
         buf = readline.get_line_buffer()
@@ -56,83 +123,63 @@ def safe_print(line: str, prompt: str = "sitl> "):
         # Fallback: stampa normale (potrebbe spezzare la riga)
         print(line)
 
-def batt_printer(prompt: str = "sitl> "):
+
+def safe_printer(prompt: str = "sitl> "):
     while True:
-        msg = batt_q.get()
+        msg = q.get()
         if msg is None:
             break
         safe_print(msg, prompt=prompt)
 
+
 def qos_retriever(args):
+    global QOS_CMD
+    qos = None
     if "-q" in args:
         idx = args.index("-q")
-        if int(args[idx+1]) != QOS_CMD:
-            qos = int(args[idx+1])
+        try:
+            level = int(args[idx + 1])
+        except (IndexError, ValueError):
+            print("[ERROR] Parameter -q require an integer in 0, 1 or 2")
+            return None
+
+        if level not in (0, 1, 2):
+            print("[ERROR] QoS must be 0, 1 o 2")
+            return None
+
+        if level != QOS_CMD:
+            qos = level
         else:
-            print(f"[UAV] QoS is actually setted to {QOS_CMD}")
+            qos = None
+            print(f"[UAV] QoS is actually set to {QOS_CMD}")
     return qos
 
-
-# ---------------------------
-# Logging
-# ---------------------------
-class JsonFormatter(logging.Formatter):
-    def format(self, record: logging.LogRecord) -> str:
-        payload = {
-            "ts": _now_utc_iso(),
-            "lvl": record.levelname,
-            "logger": record.name,
-            "msg": record.getMessage(),
-        }
-        # porta dentro i campi passati via extra=
-        for k, v in getattr(record, "__dict__", {}).items():
-            if k in ("msg", "args", "levelname", "levelno", "pathname", "filename", "module",
-                     "exc_info", "exc_text", "stack_info", "lineno", "funcName", "created",
-                     "msecs", "relativeCreated", "thread", "threadName", "processName",
-                     "process", "name"):
-                continue
-            try:
-                json.dumps(v)
-                payload[k] = v
-            except Exception:
-                payload[k] = str(v)
-        return json.dumps(payload, ensure_ascii=False)
-
-
-def make_logger(name: str, filename: str) -> logging.Logger:
-    logger = logging.getLogger(name)
-    logger.setLevel(logging.INFO)
-    fh = logging.handlers.TimedRotatingFileHandler(
-        os.path.join(LOG_DIR, filename), when="midnight", backupCount=7, utc=True, encoding="utf-8"
-    )
-    fmt = JsonFormatter()
-    fh.setFormatter(fmt)
-    logger.handlers.clear()
-    logger.addHandler(fh)
-    logger.propagate = False
-    return logger
-
-
-def log_json(logger: logging.Logger, event: str, **fields):
-    logger.info(event, extra=fields)
-
-
-LOGGER = make_logger("gcs", "gcs.log")
-NODE = "gcs"
 
 # ---------------------------
 # MQTT callbacks
 # ---------------------------
 def _on_connect(c, u, f, rc):
     print(f"[MQTT] connected rc={rc}")
-    log_json(LOGGER, "mqtt.connect", node=NODE, rc=rc, host=BROKER_HOST, port=BROKER_PORT, tls=USE_TLS)
-    r = c.subscribe(TOPIC_ACK, qos=1)
-    log_json(LOGGER, "mqtt.subscribe", node=NODE, topic=TOPIC_ACK, result=getattr(r[0], 'name', r[0]), mid=r[1])
+    c.subscribe(TOPIC_ACK, qos=1)
+    c.subscribe(TOPIC_STATUS, qos=1)
 
-    # Sottoscrizione batteria con callback dedicato
+    c.message_callback_add(TOPIC_STATUS, _on_status)
+
     c.message_callback_add(TOPIC_BATT, _on_batt)
-    r2 = c.subscribe(TOPIC_BATT, qos=1)
-    log_json(LOGGER, "mqtt.subscribe", node=NODE, topic=TOPIC_BATT, result=getattr(r2[0], 'name', r2[0]), mid=r2[1])
+    c.subscribe(TOPIC_BATT, qos=1)
+    c.subscribe(TOPIC_LAT_RES, qos=1)
+
+
+def _on_status(c, u, msg):
+    global last_status
+    try:
+        payload = msg.payload.decode("utf-8")
+
+        # metti in coda per stampa non distruttiva
+        q.put(f"[UAV] UAV Status: {payload}")
+    except Exception as e:
+        print(f"[ERROR] {e}")
+
 
 def _on_batt(c, u, msg):
     global last_batt
@@ -144,28 +191,24 @@ def _on_batt(c, u, msg):
         lvl = payload.get("level")
         last_batt = {"voltage": v, "current": crr, "level": lvl}
         # metti in coda per stampa non distruttiva
-        batt_q.put(f"[BATT] voltage={v}V  current={crr}A  level={lvl}%")
-        # log su file (no stampa diretta qui)
-        log_json(LOGGER, "tel.battery.rx", node=NODE, voltage=v, current=crr, level=lvl)
+        q.put(f"[BATT] voltage={v}V  current={crr}A  level={lvl}%")
     except Exception as e:
-        log_json(LOGGER, "tel.battery.parse_error", node=NODE, error=str(e))
+        print(f"[ERROR] {e}")
 
 
 def _on_message(c, u, msg):
     try:
         payload = json.loads(msg.payload.decode("utf-8"))
         cid = payload.get("command_id")
-        log_json(LOGGER, "ack.receive", node=NODE, topic=msg.topic, command_id=cid,
-                 ok=payload.get("ok"), detail=payload.get("detail"),
-                 error=payload.get("error"), mode=payload.get("mode"),
-                 value=payload.get("value"))
-        # name=payload.get("name") Per ora l'ho tolto
         if cid and cid in _pending:
             _pending[cid] = payload
+
+        topic = TOPIC_CMD
+        payload_bytes = len(payload)
+        topic_bytes = len(topic.encode())
+        log_link_event("rx", topic, payload_bytes + topic_bytes)
     except Exception as e:
         print("[ACK] parse error:", e)
-        log_json(LOGGER, "ack.parse_error", node=NODE, error=str(e),
-                 raw=msg.payload[:300].decode("utf-8", "ignore"))
 
 
 def make_client() -> mqtt.Client:
@@ -178,11 +221,11 @@ def make_client() -> mqtt.Client:
             certfile=CERT_FILE,
             keyfile=KEY_FILE,
         )
+    mqttc.message_callback_add(TOPIC_LAT_RES, on_latency_response)
     mqttc.connect(BROKER_HOST, BROKER_PORT, keepalive=30)
-    log_json(LOGGER, "mqtt.connecting", node=NODE, host=BROKER_HOST, port=BROKER_PORT, tls=USE_TLS)
     mqttc.loop_start()
     # Thread che stampa la batteria senza rompere l'input
-    t = threading.Thread(target=batt_printer, args=("sitl> ",), daemon=True)
+    t = threading.Thread(target=safe_printer, args=("sitl> ",), daemon=True)
     t.start()
     return mqttc
 
@@ -192,27 +235,40 @@ def publish_cmd(client: mqtt.Client, payload: Dict[str, Any], await_ack: bool = 
     Dict[str, Any]]:
     cid = payload.setdefault("command_id", f"cmd-{uuid.uuid4().hex[:8]}")
     data = json.dumps(payload, separators=(",", ":"))
-
-    if qos == None:
+    print(qos)
+    if qos is None:
         qos = QOS_CMD
 
-    log_json(LOGGER, "cmd.publish", node=NODE, topic=TOPIC_CMD, command_id=cid, body=payload)
+    # normalizza e valida QoS
+    try:
+        qos = int(qos)
+    except (TypeError, ValueError):
+        print(f"[ERROR] Invalid QoS value: {qos}")
+        return None
+
+    if qos not in (0, 1, 2):
+        print(f"[ERROR] QoS must be 0, 1 or 2, got {qos}")
+        return None
+
+    payload_bytes = len(payload) if isinstance(payload, (bytes, bytearray)) else len(str(payload).encode())
+    topic_bytes = len(TOPIC_CMD.encode())
+    log_link_event("tx", TOPIC_CMD, payload_bytes + topic_bytes)
+
     info = client.publish(TOPIC_CMD, data, qos=qos, retain=False)
     info.wait_for_publish()
-    log_json(LOGGER, "cmd.published", node=NODE, topic=TOPIC_CMD, command_id=cid, mid=getattr(info, "mid", None))
     print(f"[GCS→MQTT] {TOPIC_CMD} {data}")
+
     if not await_ack:
         return None
+
     _pending[cid] = None
     t0 = time.time()
     while time.time() - t0 < timeout:
         if _pending[cid] is not None:
             res = _pending.pop(cid)
-            log_json(LOGGER, "cmd.ack_received", node=NODE, command_id=cid, ack=res)
             return res
         time.sleep(0.05)
     res = _pending.pop(cid)
-    log_json(LOGGER, "cmd.ack_timeout", node=NODE, command_id=cid)
     return res  # None se timeout
 
 
@@ -238,10 +294,12 @@ PARAM / STATUS
   batt [-q 0|1|2]
 """
 
+
 # ---------------------------
 # CLI
 # ---------------------------
 def cli(c):
+    global QOS_CMD
     print("=== ArduPilot SITL Interactive CLI (MQTT raw enabled) ===")
     print(HELP)
 
@@ -262,6 +320,7 @@ def cli(c):
             if cmd == "help":
                 print(HELP)
             elif cmd == "guided":
+                print(qos_level)
                 qos_level = qos_retriever(parts[1:])
                 publish_cmd(c, {"type": "mode", "mode": "GUIDED"}, qos=qos_level)
                 print("[UAV] Mode GUIDED")
@@ -353,16 +412,31 @@ def cli(c):
             elif cmd == "batt":
                 qos_level = qos_retriever(parts[1:])
                 info = publish_cmd(c, {"type": "batt"}, qos=qos_level)
+
+                if not info:
+                    print("[UAV] No battery info received (timeout or error)")
+                    continue
+
                 volt = info.get("voltage")
                 curr = info.get("current")
                 lev = info.get("level")
                 print(f"[UAV] Battery voltage: {volt}, current: {curr}, level: {lev}")
             elif cmd == "qos":
-                level = parts[1]
+                try:
+                    level = int(parts[1])
+                except (IndexError, ValueError):
+                    print("[ERROR] A QoS value must be specified (0, 1 or 2)")
+                    continue
+
+                if level not in (0, 1, 2):
+                    print("[ERROR] QOS must be 0, 1 or 2")
+                    continue
+
                 if QOS_CMD == level:
                     print(f"[UAV] QoS is actually set to {level}")
                 else:
-                    qos_level = level
+                    QOS_CMD = level
+                    print(f"[UAV] QoS is now set to {QOS_CMD}")
 
         except Exception as e:
             print(f"[ERROR] {e}")
@@ -370,4 +444,10 @@ def cli(c):
 
 if __name__ == "__main__":
     c = make_client()
-    cli(c)
+    stop_event = threading.Event()
+    t_ping = threading.Thread(target=latency_ping_loop, args=(c, stop_event), daemon=True)
+    t_ping.start()
+    try:
+        cli(c)
+    finally:
+        stop_event.set()
