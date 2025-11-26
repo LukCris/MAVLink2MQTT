@@ -1,13 +1,16 @@
 # drone_mqtt.py
 from __future__ import annotations
-import base64, json, threading, time, uuid
+import base64, json, threading, time, uuid, logging
 from typing import Any, Dict
 import paho.mqtt.client as mqtt
 from dronekit import connect, VehicleMode, LocationGlobalRelative
 from pymavlink import mavutil
-from datetime import datetime, timezone
 
 from metrics_logger import init_battery_logger, log_battery
+
+TAKE_OFF = False
+LANDING = False
+ALT = None
 
 # --- Config MQTT ---
 BROKER_HOST = "10.42.0.1"
@@ -23,9 +26,9 @@ KEY_FILE = "/etc/mosquitto/certs/drone.key"
 TOPIC_CMD = f"uav/{UAV_ID}/cmd"
 TOPIC_ACK = f"uav/{UAV_ID}/ack"
 TOPIC_STATUS = f"uav/{UAV_ID}/status"
+TOPIC_TEL_ALT = f"uav/{UAV_ID}/telemetry/altitude"
 TOPIC_TEL_BAT = f"uav/{UAV_ID}/telemetry/battery"
-TOPIC_LAT_REQ = f"uav/{UAV_ID}/latency/request"
-TOPIC_LAT_RES = f"uav/{UAV_ID}/latency/response"
+TOPIC_TEL_SYS = f"uav/{UAV_ID}/telemetry/sys"
 
 # opzionale pass-through grezzo
 TOPIC_MAV_TX = f"uav/{UAV_ID}/mav/tx"  # GCS→DRONE (raw base64)
@@ -35,7 +38,7 @@ QOS_CMD = 1
 QOS_TEL = 0
 
 # --- Config SITL (il DRONE si connette al SITL) ---
-SITL_LINK = "127.0.0.1:14550"  # o "udp:127.0.0.1:14550"
+SITL_LINK = "127.0.0.1:14550"
 vehicle = None
 mqtt_client = None
 running = True
@@ -43,12 +46,9 @@ running = True
 # ---------------------------
 # Metrics
 # ---------------------------
-def on_latency_request(client, userdata, msg):
-    data = json.loads(msg.payload.decode())
-    client.publish(TOPIC_LAT_RES, json.dumps(data), qos=0, retain=False)
-
 _last_batt_timestamp = None
-_mah_consumed = 0.0   # mAh totali integrati
+_mah_consumed = 0.0  # mAh totali integrati
+
 
 def process_battery_msg(current_A):
     """
@@ -66,7 +66,7 @@ def process_battery_msg(current_A):
     # Se non abbiamo ancora un timestamp precedente, inizializziamo e non calcoliamo nulla.
     if _last_batt_timestamp is None:
         _last_batt_timestamp = t_now
-        return _mah_consumed   # 0 la prima volta
+        return _mah_consumed  # 0 la prima volta
 
     # Calcolo dell'intervallo di tempo Δt
     # Tempo trascorso in secondi dall’ultima lettura
@@ -99,6 +99,61 @@ def setup_battery_logging(vehicle):
         log_battery(voltage_V, current_A, remaining_pct=remaining, mah_consumed=mah_consumed)
 
 
+log_ap = logging.getLogger("autopilot")
+
+
+def setup_statustext_forward(vehicle):
+    """
+    Inoltra i messaggi STATUSTEXT dell'autopilota via MQTT
+    e li logga localmente col logger 'autopilot'.
+    """
+
+    @vehicle.on_message('STATUSTEXT')
+    def listener(self, name, msg):
+        global mqtt_client
+
+        # msg.text in DroneKit è una stringa o una sequenza di char
+        try:
+            text = msg.text
+            # se contiene padding NUL, ripulisci
+            if isinstance(text, bytes):
+                text = text.decode("utf-8", errors="ignore")
+            text = text.strip("\x00")
+        except Exception:
+            text = "<invalid text>"
+
+        # Severità in chiaro, se disponibile
+        severity_map = {
+            mavutil.mavlink.MAV_SEVERITY_EMERGENCY: "EMERGENCY",
+            mavutil.mavlink.MAV_SEVERITY_ALERT: "ALERT",
+            mavutil.mavlink.MAV_SEVERITY_CRITICAL: "CRITICAL",
+            mavutil.mavlink.MAV_SEVERITY_ERROR: "ERROR",
+            mavutil.mavlink.MAV_SEVERITY_WARNING: "WARNING",
+            mavutil.mavlink.MAV_SEVERITY_NOTICE: "NOTICE",
+            mavutil.mavlink.MAV_SEVERITY_INFO: "INFO",
+            mavutil.mavlink.MAV_SEVERITY_DEBUG: "DEBUG",
+        }
+        sev = severity_map.get(msg.severity, f"SEV_{msg.severity}")
+
+        # Log locale sul drone (come quelli che già vedi)
+        log_ap.warning("%s: %s", sev, text)
+
+        # Inoltra via MQTT alla GCS
+        if mqtt_client is not None:
+            try:
+                payload = {
+                    "severity": sev,
+                    "text": text,
+                }
+                mqtt_client.publish(
+                    TOPIC_TEL_SYS,
+                    json.dumps(payload),
+                    qos=QOS_TEL
+                )
+            except Exception as e:
+                print("[SYS] MQTT publish error:", e)
+
+
 # ---------------------------
 # Helpers MAVLink / DroneKit
 # ---------------------------
@@ -110,7 +165,13 @@ def _ack(command_id: str | None, ok: bool, **extra):
 
 
 def set_mode(mode: str):
-    #log_json(LOGGER, "action.set_mode", node=NODE, mode=mode)
+    global LANDING
+
+    if mode.upper() in ("LAND", "RTL"):
+        LANDING = True
+    else:
+        LANDING = False
+
     vehicle.mode = VehicleMode(mode)
     t0 = time.time()
     while time.time() - t0 < 6:
@@ -131,6 +192,9 @@ def arm_disarm(arm: bool):
 
 
 def takeoff(alt: float):
+    global TAKE_OFF
+    global ALT
+    ALT = alt
     if vehicle.mode.name.upper() != "GUIDED":
         if not set_mode("GUIDED"):
             return False
@@ -138,10 +202,7 @@ def takeoff(alt: float):
         if not arm_disarm(True):
             return False
     vehicle.simple_takeoff(alt)
-    while True:
-        a = vehicle.location.global_relative_frame.alt or 0.0
-        if a >= 0.95 * alt: break
-        time.sleep(0.5)
+    TAKE_OFF = True
     return True
 
 
@@ -228,7 +289,6 @@ def on_connect(client, userdata, flags, rc):
     client.publish(TOPIC_STATUS, "online", qos=1, retain=True)
     client.subscribe(TOPIC_CMD, qos=QOS_CMD)
     client.subscribe(TOPIC_MAV_TX, qos=0)
-    client.subscribe(TOPIC_LAT_REQ, qos=1)
 
 
 def on_disconnect(client, userdata, rc):
@@ -237,6 +297,7 @@ def on_disconnect(client, userdata, rc):
 
 def on_message(client, userdata, msg):
     print(f"[MQTT] RX topic={msg.topic} payload={msg.payload[:120]!r}")
+
     if msg.topic == TOPIC_MAV_TX:
         try:
             raw = base64.b64decode(msg.payload)
@@ -244,6 +305,7 @@ def on_message(client, userdata, msg):
         except Exception as e:
             print("[RAW] write failed:", e)
         return
+
     # comandi JSON
     try:
         p = json.loads(msg.payload.decode("utf-8"))
@@ -306,15 +368,36 @@ def handle_command(p: Dict[str, Any]):
 # Telemetria
 # ---------------------------
 def telemetry_loop():
-    last_hb_log = 0.0          # snapshot stato (mode/armed) ogni 15s
-    last_bat_log = 0.0         # snapshot batteria ogni 15s
-    HB_LOG_EVERY  = 15.0
+    global TAKE_OFF, LANDING
+    last_bat_log = 0.0  # snapshot batteria ogni 15s
     BAT_LOG_EVERY = 15.0
 
     while running and vehicle is not None:
         try:
             bat = vehicle.battery
             now = time.time()
+
+            if TAKE_OFF:
+                alt = vehicle.location.global_relative_frame.alt or 0.0
+                if alt <= 0.95 * ALT:
+                    mqtt_client.publish(
+                        TOPIC_TEL_ALT,
+                        json.dumps({"altitude": alt}),
+                        qos=QOS_TEL
+                    )
+                else:
+                    TAKE_OFF = False
+
+            if LANDING:
+                alt = vehicle.location.global_relative_frame.alt or 0.0
+                if alt >= 1.0:
+                    mqtt_client.publish(
+                        TOPIC_TEL_ALT,
+                        json.dumps({"altitude": alt}),
+                        qos=QOS_TEL
+                    )
+                else:
+                    LANDING = False
 
             # Batteria ogni 10s
             if bat and (now - last_bat_log >= BAT_LOG_EVERY):
@@ -336,15 +419,18 @@ def telemetry_loop():
 # ---------------------------
 def main():
     global vehicle, mqtt_client, running
-    print(f"[DRONE] Connecting SITL {SITL_LINK} ...")
+    print(f"[UAV] Connecting SITL {SITL_LINK} ...")
     vehicle = connect(SITL_LINK, wait_ready=True, timeout=60)
-    print("[DRONE] Vehicle connected.")
+    print("[UAV] Vehicle connected.")
     setup_battery_logging(vehicle)
+    setup_statustext_forward(vehicle)
+
     mqtt_client = mqtt.Client(client_id=CLIENT_ID, clean_session=True)
     mqtt_client.will_set(TOPIC_STATUS, "offline", qos=1, retain=True)
     mqtt_client.on_connect = on_connect
     mqtt_client.on_disconnect = on_disconnect
     mqtt_client.on_message = on_message
+
     if USE_TLS:
         mqtt_client.tls_set(
             ca_certs=CERT_CA,
@@ -352,12 +438,15 @@ def main():
             keyfile=KEY_FILE,
         )
         pass
-    mqtt_client.message_callback_add(TOPIC_LAT_REQ, on_latency_request)
+
     mqtt_client.connect(BROKER_HOST, BROKER_PORT, keepalive=30)
     mqtt_client.loop_start()
+
     threading.Thread(target=telemetry_loop, daemon=True).start()
+
     try:
-        while True: time.sleep(0.5)
+        while True:
+            time.sleep(0.5)
     except KeyboardInterrupt:
         pass
     finally:

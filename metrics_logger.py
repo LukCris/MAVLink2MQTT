@@ -19,28 +19,6 @@ def log_battery(voltage_V, current_A, remaining_pct=None, mah_consumed=None):
         w = csv.writer(f)
         w.writerow([time.time(), voltage_V, current_A, remaining_pct, mah_consumed])
 
-# -----------------------------
-# Throughput/bit rate/bandwidth
-# -----------------------------
-def init_link_logger():
-    if not LINK_FILE.exists():
-        with LINK_FILE.open("w", newline="") as f:
-            w = csv.writer(f)
-            w.writerow(["t_s", "direction", "topic", "payload_bytes", "total_tx_bytes", "total_rx_bytes"])
-
-_total_tx = 0
-_total_rx = 0
-
-def log_link_event(direction, topic, payload_bytes):
-    global _total_tx, _total_rx
-    if direction == "tx":
-        _total_tx += payload_bytes
-    elif direction == "rx":
-        _total_rx += payload_bytes
-
-    with LINK_FILE.open("a", newline="") as f:
-        w = csv.writer(f)
-        w.writerow([time.time(), direction, topic, payload_bytes, _total_tx, _total_rx])
 
 def init_latency_logger():
     if not LAT_FILE.exists():
