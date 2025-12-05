@@ -3,7 +3,7 @@ set -euo pipefail
 
 # per eseguire: ./run_drone_scenario.sh dist-5m_tls-on_qos1
 
-VENV_DIR="./.venv"
+VENV_DIR="/home/tesista/venv-ardupilot"
 
 # es. scenario_name = dist-5m_tls-on_qos1
 SCENARIO="${1:-}"
@@ -23,11 +23,13 @@ source "$VENV_DIR/bin/activate"
 export ML2MQTT_LOG_DIR="./logs/$SCENARIO"
 mkdir -p "$ML2MQTT_LOG_DIR"
 
-echo "[DRONE] Scenario: $SCENARIO"
-echo "[DRONE] ML2MQTT_LOG_DIR=$ML2MQTT_LOG_DIR"
+echo "[UAV] Scenario: $SCENARIO"
+echo "[UAV] ML2MQTT_LOG_DIR=$ML2MQTT_LOG_DIR"
 
-# opzionale: avviare iperf3 server (per i test di banda)
-# Scommenta se serve.
+# Quando esci, prova a killare i job in background (ping)
+trap 'echo "[UAV] cleanup bg jobs"; kill 0 || true' EXIT
+
+# avvia iperf3 server (per i test di banda)
 iperf3 -s > "$ML2MQTT_LOG_DIR/iperf_server.log" 2>&1 &
 
 # avvia il bridge drone↔MQTT (foreground)

@@ -30,26 +30,11 @@ echo "[GCS] Drone IP: $DRONE_IP"
 echo "[GCS] Wi-Fi iface: $IFACE"
 echo "[GCS] Using Python from: $(which python3)"
 
-# Quando esci, prova a killare i job in background (ping + RSSI)
+# Quando esci, prova a killare i job in background (ping)
 trap 'echo "[GCS] cleanup bg jobs"; kill 0 || true' EXIT
 
 # --- Ping ICMP ---
 ping "$DRONE_IP" -i 0.2 -D > "$ML2MQTT_LOG_DIR/ping_icmp.log" 2>&1 &
-
-# --- Logger RSSI/Wi-Fi ogni 1s ---
-(
-  if [ ! -d "/sys/class/net/$IFACE" ]; then
-    echo "[GCS] Wi-Fi iface '$IFACE' not found, skipping RSSI logging"
-    exit 0
-  fi
-
-  while true; do
-    TS=$(date +%s.%N)
-    OUT=$(iw dev "$IFACE" link 2>/dev/null | grep "signal:" || true)
-    echo "$TS,$OUT" >> "$ML2MQTT_LOG_DIR/wifi_rssi.log"
-    sleep 1
-  done
-) &
 
 # --- Avvia la GCS (CLI) in foreground ---
 python3 gcs.py

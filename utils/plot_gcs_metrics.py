@@ -17,7 +17,6 @@ PING_LOG = "ping_icmp.log"
 LATENCY_CSV = "latency_metrics.csv"
 IPERF_TCP_JSON = "iperf_tcp.json"
 IPERF_UDP_JSON = "iperf_udp_10M.json"
-WIFI_RSSI_LOG = "wifi_rssi.log"
 
 
 def ensure_plots_dir(path: str):
@@ -336,61 +335,6 @@ def plot_iperf_udp(df: pd.DataFrame, summary: dict, outdir: str, prefix: str = "
     plt.savefig(out_path, dpi=300)
     plt.close()
 
-
-# ========================
-# WIFI RSSI
-# ========================
-
-def parse_wifi_rssi(path: str) -> pd.DataFrame:
-    """
-    wifi_rssi.log
-    Atteso: CSV con 2 colonne: t_s, rssi_dbm
-    - Se il file ha solo il timestamp e la virgola (come nell'esempio), la seconda colonna sarà NaN -> verrà droppata.
-    - Se c'è header, pandas lo gestisce comunque (proviamo prima senza header, poi con).
-    """
-    df = None
-    try:
-        # Provo come file senza header
-        df = pd.read_csv(path, header=None, names=["t_s", "rssi_dbm"])
-    except Exception:
-        # fallback generico
-        df = pd.read_csv(path)
-
-    # Drop righe senza RSSI
-    if "rssi_dbm" in df.columns:
-        df = df.dropna(subset=["rssi_dbm"])
-    else:
-        print("[WIFI RSSI] Nessuna colonna 'rssi_dbm' trovata, skip del grafico")
-        return pd.DataFrame()
-
-    if df.empty:
-        print("[WIFI RSSI] Nessun dato valido (tutte le righe senza RSSI)")
-        return df
-
-    df["t_s"] = df["t_s"].astype(float)
-    df["rssi_dbm"] = df["rssi_dbm"].astype(float)
-    df = df.sort_values("t_s").reset_index(drop=True)
-    df["t_rel_s"] = df["t_s"] - df["t_s"].iloc[0]
-    return df
-
-
-def plot_wifi_rssi(df: pd.DataFrame, outdir: str, prefix: str = "wifi_rssi"):
-    if df.empty:
-        print("[WIFI RSSI] Nessun dato da plottare")
-        return
-
-    plt.figure()
-    plt.plot(df["t_rel_s"], df["rssi_dbm"])
-    plt.xlabel("Time [s]")
-    plt.ylabel("RSSI [dBm]")
-    plt.title("Wi-Fi RSSI vs time")
-    plt.grid(True)
-    plt.tight_layout()
-    out_path = os.path.join(outdir, f"{prefix}_vs_time.png")
-    plt.savefig(out_path, dpi=300)
-    plt.close()
-
-
 # ========================
 # MAIN
 # ========================
@@ -433,15 +377,6 @@ def main():
         plot_iperf_udp(df_udp, sum_udp, PLOTS_DIR)
     else:
         print(f"[IPERF UDP] File non trovato: {udp_path}")
-
-    # --- WiFi RSSI ---
-    rssi_path = os.path.join(LOG_DIR, WIFI_RSSI_LOG)
-    if os.path.exists(rssi_path):
-        df_rssi = parse_wifi_rssi(rssi_path)
-        print(f"[WIFI RSSI] Campioni validi: {len(df_rssi)}")
-        plot_wifi_rssi(df_rssi, PLOTS_DIR)
-    else:
-        print(f"[WIFI RSSI] File non trovato: {rssi_path}")
 
     print(f"Tutti i grafici (disponibili) sono stati salvati in: {PLOTS_DIR}")
 
