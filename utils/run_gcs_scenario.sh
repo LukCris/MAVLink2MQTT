@@ -4,9 +4,12 @@ set -euo pipefail
 # === CONFIG ===
 VENV_DIR="./.venv"
 
+# ./run_gcs_scenario.sh <name scenario> <IP Drone> <iface> <avg_noise>
+
 SCENARIO="${1:-}"
 DRONE_IP="${2:-}"
-IFACE="${3:-wlan0}"
+IFACE="${3:-}"
+NOISE="${4:-}"
 
 if [ -z "$SCENARIO" ] || [ -z "$DRONE_IP" ]; then
   echo "Usage: $0 <scenario_name> <drone_ip> [wifi_iface]"
@@ -35,6 +38,29 @@ trap 'echo "[GCS] cleanup bg jobs"; kill 0 || true' EXIT
 
 # --- Ping ICMP ---
 ping "$DRONE_IP" -i 0.2 -D > "$ML2MQTT_LOG_DIR/ping_icmp.log" 2>&1 &
+
+(
+  OUT="$ML2MQTT_LOG_DIR/wifi_rssi.log"
+  IFACE="wlo1"
+
+  while true; do
+      TS=$(date +%s.%N)
+
+      LINE_SIG=$(iw dev "$IFACE" link 2>/dev/null | grep "signal:" || true)
+      SIG=""
+      if [ -n "$LINE_SIG" ]; then
+          SIG=$(echo "$LINE_SIG" | sed -E 's/.*signal level=([-0-9]+)\s*dBm.*/\1/')
+      fi
+
+      if [ -n "$SIG" ]; then
+          SNR=$((SIG - NOISE))
+          echo "$TS,$SIG,$NOISE,$SNR" >> "$OUT"
+      fi
+
+      sleep 1
+  done
+) &
+
 
 # --- Avvia la GCS (CLI) in foreground ---
 python3 gcs.py

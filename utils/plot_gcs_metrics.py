@@ -10,8 +10,8 @@ import matplotlib.pyplot as plt
 # CONFIG
 # ========================
 
-LOG_DIR = "./logs/dist-5m_tls-on_qos1"          # cartella dove stanno i file di log
-PLOTS_DIR = "./plots"  # cartella di output per i PNG
+LOG_DIR = "../logs/dist-42cm_tls-on_qos0_5ghz"          # cartella dove stanno i file di log
+PLOTS_DIR = "../42cm_plots_QoS0/5ghz"  # cartella di output per i PNG
 
 PING_LOG = "ping_icmp.log"
 LATENCY_CSV = "latency_metrics.csv"
@@ -114,19 +114,42 @@ def plot_latency(df: pd.DataFrame, outdir: str, prefix: str = "latency"):
         print("[LATENCY] Nessun dato da plottare")
         return
 
-    # RTT per comando (scatter con id)
+    # =====================
+    # LINEA + PUNTI
+    # =====================
     plt.figure()
-    plt.scatter(df["t_rel_s"], df["rtt_ms"])
+    plt.plot(df["t_rel_s"], df["rtt_ms"], marker="o", linestyle="-")
     plt.xlabel("Time [s]")
     plt.ylabel("Command RTT [ms]")
     plt.title("MQTT command latency vs time")
     plt.grid(True)
     plt.tight_layout()
-    out_path = os.path.join(outdir, f"{prefix}_rtt_vs_time.png")
+    out_path = os.path.join(outdir, f"{prefix}_rtt_vs_time_line.png")
     plt.savefig(out_path, dpi=300)
     plt.close()
 
-    # Eventuale istogramma RTT
+    # =====================
+    # MOVING AVERAGE (se almeno 5 punti)
+    # =====================
+    if len(df) >= 5:
+        df["rtt_smooth"] = df["rtt_ms"].rolling(window=3, center=True).mean()
+
+        plt.figure()
+        plt.plot(df["t_rel_s"], df["rtt_ms"], marker="o", alpha=0.4, label="raw")
+        plt.plot(df["t_rel_s"], df["rtt_smooth"], linewidth=2, label="moving avg (3)")
+        plt.xlabel("Time [s]")
+        plt.ylabel("Command RTT [ms]")
+        plt.title("MQTT command latency (smoothed)")
+        plt.grid(True)
+        plt.legend()
+        plt.tight_layout()
+        out_path = os.path.join(outdir, f"{prefix}_rtt_smooth.png")
+        plt.savefig(out_path, dpi=300)
+        plt.close()
+
+    # =====================
+    # ISTOGRAMMA
+    # =====================
     plt.figure()
     plt.hist(df["rtt_ms"], bins=20)
     plt.xlabel("Command RTT [ms]")
@@ -134,9 +157,23 @@ def plot_latency(df: pd.DataFrame, outdir: str, prefix: str = "latency"):
     plt.title("MQTT command latency distribution")
     plt.grid(True)
     plt.tight_layout()
-    out_path = os.path.join(outdir, f"{prefix}_rtt_hist.png")
+    out_path = os.path.join(outdir, f"{prefix}_hist.png")
     plt.savefig(out_path, dpi=300)
     plt.close()
+
+    # =====================
+    # BOXPLOT
+    # =====================
+    plt.figure()
+    plt.boxplot(df["rtt_ms"].dropna(), vert=True)
+    plt.ylabel("Command RTT [ms]")
+    plt.title("MQTT command latency (boxplot)")
+    plt.grid(True)
+    plt.tight_layout()
+    out_path = os.path.join(outdir, f"{prefix}_boxplot.png")
+    plt.savefig(out_path, dpi=300)
+    plt.close()
+
 
 
 # ========================
