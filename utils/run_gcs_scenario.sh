@@ -40,27 +40,36 @@ trap 'echo "[GCS] cleanup bg jobs"; kill 0 || true' EXIT
 ping "$DRONE_IP" -i 0.2 -D > "$ML2MQTT_LOG_DIR/ping_icmp.log" 2>&1 &
 
 (
-  OUT="$ML2MQTT_LOG_DIR/wifi_rssi.log"
-  IFACE="wlo1"
+
+  OUT="$ML2MQTT_LOG_DIR/wifi_snr.log"
+
+  # header
+  echo "ts,signal_dbm,noise_db,est_snr_db" >> "$OUT"
 
   while true; do
-      TS=$(date +%s.%N)
+    TS=$(date +%s.%N)
 
-      LINE_SIG=$(iw dev "$IFACE" link 2>/dev/null | grep "signal:" || true)
-      SIG=""
-      if [ -n "$LINE_SIG" ]; then
-          SIG=$(echo "$LINE_SIG" | sed -E 's/.*signal level=([-0-9]+)\s*dBm.*/\1/')
-      fi
+    # Prendi RSSI dal lato AP (station dump)
+    SIG=$(iw dev "$IFACE" station dump 2>/dev/null | awk '
+      /signal avg:/ {print $3; exit}
+      /^signal:/ {print $2; exit}
+    ')
 
-      if [ -n "$SIG" ]; then
-          SNR=$((SIG - NOISE))
-          echo "$TS,$SIG,$NOISE,$SNR" >> "$OUT"
-      fi
-
+    if [[ -z "$SIG" ]]; then
+      echo "$TS,,${NOISE:-},"
       sleep 1
+      continue
+    fi
+
+    NOISE_VAL="${NOISE:--69}"
+
+    SNR=$(( SIG - NOISE_VAL ))
+    echo "$TS,$SIG,$NOISE_VAL,$SNR" >> "$OUT"
+
+    sleep 1
   done
 ) &
 
 
 # --- Avvia la GCS (CLI) in foreground ---
-python3 gcs.py
+python3 ground_station.py

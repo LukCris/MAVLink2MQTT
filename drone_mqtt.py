@@ -1,5 +1,4 @@
 # drone_mqtt.py
-from __future__ import annotations
 import base64, json, threading, time, uuid, logging
 from typing import Any, Dict
 import paho.mqtt.client as mqtt
@@ -19,9 +18,9 @@ USE_TLS = True
 UAV_ID = "uav1"
 CLIENT_ID = f"drone-bridge-{uuid.uuid4()}"
 
-CERT_CA = "/etc/mosquitto/ca_certificates/ca.crt"
-CERT_FILE = "/etc/mosquitto/certs/drone.crt"
-KEY_FILE = "/etc/mosquitto/certs/drone.key"
+CERT_CA = "./certs/ca.crt"
+CERT_FILE = "./certs/client.crt"
+KEY_FILE = "./certs/client.key"
 
 TOPIC_CMD = f"uav/{UAV_ID}/cmd"
 TOPIC_ACK = f"uav/{UAV_ID}/ack"
@@ -29,13 +28,20 @@ TOPIC_STATUS = f"uav/{UAV_ID}/status"
 TOPIC_TEL_ALT = f"uav/{UAV_ID}/telemetry/altitude"
 TOPIC_TEL_BAT = f"uav/{UAV_ID}/telemetry/battery"
 TOPIC_TEL_SYS = f"uav/{UAV_ID}/telemetry/sys"
+TOPIC_HEARTBEAT = f"uav/{UAV_ID}/heartbeat"
+
+_last_heartbeat_time = time.time()
+_emergency_landing_active = False
 
 # opzionale pass-through grezzo
 TOPIC_MAV_TX = f"uav/{UAV_ID}/mav/tx"  # GCS→DRONE (raw base64)
 TOPIC_MAV_RX = f"uav/{UAV_ID}/mav/rx"  # DRONE→GCS (raw base64)
 
+HEARTBEAT_TIMEOUT = 10.0  # secondi prima di attivare il failsafe
 QOS_CMD = 1
 QOS_TEL = 0
+
+
 
 # --- Config SITL (il DRONE si connette al SITL) ---
 SITL_LINK = "127.0.0.1:14550"
@@ -50,43 +56,6 @@ _last_batt_timestamp = None
 _mah_consumed = 0.0  # mAh totali integrati
 
 
-def process_battery_msg(current_A):
-    """
-    Integra la corrente misurata dal flight controller per calcolare
-    i milliampere-ora (mAh) consumati.
-
-    current_A: corrente istantanea in Ampere (float)
-    """
-
-    global _last_batt_timestamp, _mah_consumed
-
-    # Timestamp corrente in secondi
-    t_now = time.time()
-
-    # Se non abbiamo ancora un timestamp precedente, inizializziamo e non calcoliamo nulla.
-    if _last_batt_timestamp is None:
-        _last_batt_timestamp = t_now
-        return _mah_consumed  # 0 la prima volta
-
-    # Calcolo dell'intervallo di tempo Δt
-    # Tempo trascorso in secondi dall’ultima lettura
-    delta_t_s = t_now - _last_batt_timestamp
-
-    # Aggiornamento timestamp
-    _last_batt_timestamp = t_now
-
-    # Integrazione della corrente. Formula:
-    #   mAh = I(A) * (t_sec / 3600) * 1000
-    #  - dividiamo per 3600 per convertire i secondi in ore
-    #  - moltiplichiamo per 1000 per passare da Ah a mAh
-    mah_increment = current_A * (delta_t_s / 3600.0) * 1000.0
-
-    # Accumuliamo il consumo totale
-    _mah_consumed += mah_increment
-
-    return _mah_consumed
-
-
 def setup_battery_logging(vehicle):
     init_battery_logger()
 
@@ -94,9 +63,8 @@ def setup_battery_logging(vehicle):
     def listener(self, name, msg):
         voltage_V = msg.voltage_battery / 1000.0 if msg.voltage_battery != 0xFFFF else None
         current_A = msg.current_battery / 100.0 if msg.current_battery != 0xFFFF else None
-        mah_consumed = process_battery_msg(current_A)
         remaining = msg.battery_remaining if msg.battery_remaining != 0xFF else None
-        log_battery(voltage_V, current_A, remaining_pct=remaining, mah_consumed=mah_consumed)
+        log_battery(voltage_V, current_A, remaining_pct=remaining)
 
 
 log_ap = logging.getLogger("autopilot")
@@ -284,10 +252,44 @@ def get_param(name: str):
 # ---------------------------
 # MQTT callbacks
 # ---------------------------
+def _on_heartbeat(client, userdata, msg):
+    """Aggiorna il timestamp dell'ultimo heartbeat ricevuto dalla GCS."""
+    global _last_heartbeat_time, _emergency_landing_active
+    _last_heartbeat_time = time.time()
+    _emergency_landing_active = False  # se la GCS torna online, resetta il flag
+
+
+def heartbeat_watchdog():
+    """
+    Monitora il heartbeat della GCS.
+    Se non viene ricevuto alcun messaggio entro HEARTBEAT_TIMEOUT secondi
+    e il drone è armato, attiva l'atterraggio di emergenza.
+    """
+    global _last_heartbeat_time, _emergency_landing_active
+    # Attendi qualche secondo all'avvio per dare tempo alla GCS di connettersi
+    time.sleep(15)
+    while running:
+        elapsed = time.time() - _last_heartbeat_time
+        if elapsed > HEARTBEAT_TIMEOUT and not _emergency_landing_active:
+            if vehicle is not None and vehicle.armed:
+                print(f"[WARNING] GCS heartbeat lost ({elapsed:.1f}s). "
+                      f"Activating emergency landing.")
+                try:
+                    set_mode("LAND")
+                    _emergency_landing_active = True
+                except Exception as e:
+                    print(f"[WARNING] Failed to set LAND mode: {e}")
+                # Resetta il timer per evitare chiamate ripetute
+                _last_heartbeat_time = time.time()
+        time.sleep(1.0)
+
+
 def on_connect(client, userdata, flags, rc):
     print(f"[MQTT] Connected rc={rc} host={BROKER_HOST} port={BROKER_PORT}")
     client.publish(TOPIC_STATUS, "online", qos=1, retain=True)
     client.subscribe(TOPIC_CMD, qos=QOS_CMD)
+    client.subscribe(TOPIC_HEARTBEAT, qos=0)
+    #client.message_callback_add(TOPIC_HEARTBEAT, _on_heartbeat) # Attivarlo al passaggio al drone reale
     client.subscribe(TOPIC_MAV_TX, qos=0)
 
 
@@ -443,6 +445,7 @@ def main():
     mqtt_client.loop_start()
 
     threading.Thread(target=telemetry_loop, daemon=True).start()
+    #threading.Thread(target=heartbeat_watchdog, daemon=True).start() # Attivarlo al passaggio al drone reale
 
     try:
         while True:

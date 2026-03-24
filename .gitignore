@@ -7,7 +7,7 @@ __pycache__/
 *.csv
 .env
 .env*/
-*.log
+*.logs/
 
 .idea/
 "@ | Out-File -FilePath .gitignore -Encoding utf8 -NoNewline
