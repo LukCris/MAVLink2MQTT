@@ -88,6 +88,8 @@ Install Python dependencies:
 pip install dronekit paho-mqtt pymavlink pandas matplotlib
 ```
 
+---
+
 ## Quick Start
 
 ### 1. Drone side
