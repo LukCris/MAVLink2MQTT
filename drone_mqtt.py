@@ -309,13 +309,44 @@ def on_message(client, userdata, msg):
         return
 
     # comandi JSON
-    try:
+    """try:
         p = json.loads(msg.payload.decode("utf-8"))
         cid = p.get("command_id")
         ok, detail = handle_command(p)
         _ack(cid, ok, **detail)
     except Exception as e:
+        print("[CMD] error:", e)"""
+
+    try:
+        p = json.loads(msg.payload.decode("utf-8"))
+        threading.Thread(
+            target=_handle_and_ack,
+            args=(p,),
+            daemon=True
+        ).start()
+    except Exception as e:
         print("[CMD] error:", e)
+
+
+# VALUTA DI INSERIRE L'ACK ACCEPTED DIRETTAMENTE IN HANDLE_COMMAND
+def _handle_and_ack(p: Dict[str, Any]):
+    cid = p.get("command_id")
+    t = str(p.get("type", "")).lower()
+
+    # Comandi bloccanti: ACK subito, poi esegui
+    ASYNC_CMDS = {"move", "velocity", "takeoff"}
+
+    try:
+        if t in ASYNC_CMDS:
+            _ack(cid, True, detail="accepted")  # ACK immediato alla GCS
+            ok, detail = handle_command(p)  # Esecuzione del comando bloccante
+            # Notifica completamento
+            _ack(cid, ok, detail="completed", **{k: v for k, v in detail.items() if k != "detail"})
+        else:
+            ok, detail = handle_command(p)
+            _ack(cid, ok, **detail)
+    except Exception as e:
+        _ack(cid, False, error=str(e))
 
 
 def handle_command(p: Dict[str, Any]):
