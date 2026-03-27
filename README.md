@@ -11,9 +11,9 @@ network parameters (latency, throughput, QoS, TLS overhead) in UAV command-and-c
 ┌──────────────────────────────────┐        Wi-Fi / TLS        ┌──────────────────────────────────┐
 │           DRONE SIDE             │ ◄───────────────────────  │           GCS SIDE               │
 │                                  │                           │                                  │
-│  ArduPilot / SITL                │    MQTT Broker            │  ground_station.py               │
-│        │                         │    (Mosquitto)            │    - Interactive CLI             │
-│  drone_mqtt.py                   │    port 8883 (TLS)        │    - Publishes commands          │
+│  ArduPilot / SITL                │        MQTT Broker       │  ground_station.py               │
+│        │                         │        (Mosquitto)       │    - Interactive CLI             │
+│  drone_mqtt.py                   │      port 8883 (TLS)     │    - Publishes commands          │
 │    - DroneKit bridge             │                           │    - Awaits ACKs                 │
 │    - Handles commands            │                           │    - Logs RTT latency            │
 │    - Publishes telemetry         │                           │    - Displays telemetry          │
@@ -85,7 +85,7 @@ network parameters (latency, throughput, QoS, TLS overhead) in UAV command-and-c
 
 Install Python dependencies:
 ```bash
-  pip install dronekit paho-mqtt pymavlink pandas matplotlib
+pip install dronekit paho-mqtt pymavlink pandas matplotlib
 ```
 
 ## Quick Start
@@ -93,25 +93,25 @@ Install Python dependencies:
 ### 1. Drone side
 
 ```bash
-  # On the drone (or SITL machine)
-  python3 drone_mqtt.py
+# On the drone (or SITL machine)
+python3 drone_mqtt.py
 ```
 
 Or use the scenario script:
 ```bash
-  ./utils/run_drone_scenario.sh dist-5m_tls-on_qos1
+./utils/run_drone_scenario.sh dist-5m_tls-on_qos1
 ```
 
 ### 2. GCS side
 
 ```bash
-    # On the ground station
-    python3 ground_station.py
+# On the ground station
+python3 ground_station.py
 ```
 
 Or use the scenario script (includes automatic ping and RSSI logging):
 ```bash
-  ./utils/run_gcs_scenario.sh dist-5m_tls-on_qos1 10.42.0.20 wlo1 -85
+./utils/run_gcs_scenario.sh dist-5m_tls-on_qos1 10.42.0.20 wlo1 -85
 ```
 
 ### 3. GCS CLI Commands
@@ -141,7 +141,7 @@ move east 2 10 -q 2
 ### iperf3
 
 ```bash
-  ./utils/run_iperf_scenario.sh dist-5m_tls-on_qos1 10.42.0.20
+./utils/run_iperf_scenario.sh dist-5m_tls-on_qos1 10.42.0.20
 ```
 
 Runs a 30-second TCP test and a 30-second UDP test at 10 Mbps, saving results to `logs/<scenario>/`.
@@ -149,7 +149,7 @@ Runs a 30-second TCP test and a 30-second UDP test at 10 Mbps, saving results to
 ### RF Noise Floor (HackRF)
 
 ```bash
-  python3 utils/measure_avg_noise_hackrf.py --band 5 --duration 60 --outfile noise_5ghz.csv
+python3 utils/measure_avg_noise_hackrf.py --band 5 --duration 60 --outfile noise_5ghz.csv
 ```
 
 ---
@@ -159,7 +159,7 @@ Runs a 30-second TCP test and a 30-second UDP test at 10 Mbps, saving results to
 After a scenario run, generate all plots with:
 
 ```bash
-  python3 utils/plot_gcs_metrics.py
+python3 utils/plot_gcs_metrics.py
 ```
 
 This produces PNG plots for:
@@ -170,8 +170,8 @@ This produces PNG plots for:
 
 Battery plots:
 ```bash
-  python3 utils/plot_drone_metrics.py
-  # (reads battery_metrics.csv from the current directory)
+python3 utils/plot_drone_metrics.py
+# (reads battery_metrics.csv from the current directory)
 ```
 
 ---
@@ -214,7 +214,7 @@ Key constants at the top of each file:
 DroneKit depends on the `future` package, which provides the `past` module. If you see this error on import, install it explicitly:
 
 ```bash
-  pip install future
+pip install future
 ```
 
 ### `TypeError: metaclass conflict` or `MutableMapping` error in DroneKit
