@@ -11,9 +11,9 @@ network parameters (latency, throughput, QoS, TLS overhead) in UAV command-and-c
 ┌──────────────────────────────────┐        Wi-Fi / TLS        ┌──────────────────────────────────┐
 │           DRONE SIDE             │ ◄───────────────────────  │           GCS SIDE               │
 │                                  │                           │                                  │
-│  ArduPilot / SITL                │        MQTT Broker       │  ground_station.py               │
-│        │                         │        (Mosquitto)       │    - Interactive CLI             │
-│  drone_mqtt.py                   │      port 8883 (TLS)     │    - Publishes commands          │
+│  ArduPilot / SITL                │        MQTT Broker        │  ground_station.py               │
+│        │                         │        (Mosquitto)        │    - Interactive CLI             │
+│  drone_mqtt.py                   │      port 8883 (TLS)      │    - Publishes commands          │
 │    - DroneKit bridge             │                           │    - Awaits ACKs                 │
 │    - Handles commands            │                           │    - Logs RTT latency            │
 │    - Publishes telemetry         │                           │    - Displays telemetry          │
