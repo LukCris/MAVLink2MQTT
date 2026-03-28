@@ -9,7 +9,7 @@ network parameters (latency, throughput, QoS, TLS overhead) in UAV command-and-c
 
 ```
 ┌──────────────────────────────────┐        Wi-Fi / TLS        ┌──────────────────────────────────┐
-│           DRONE SIDE             │ ◄───────────────────────  │           GCS SIDE               │
+│           DRONE SIDE             │ ◄───────────────────────► │           GCS SIDE               │
 │                                  │                           │                                  │
 │  ArduPilot / SITL                │        MQTT Broker        │  ground_station.py               │
 │        │                         │        (Mosquitto)        │    - Interactive CLI             │
@@ -231,6 +231,26 @@ to:
 
 ```python
 class Parameters(collections.abc.MutableMapping, HasObservers):
+```
+
+### `SerialException` on vehicle connect
+
+DroneKit requires `pyserial` to handle serial connections. If you get a `SerialException` even when connecting over UDP/TCP, install it explicitly:
+
+```bash
+pip install pyserial
+```
+
+### TLS handshake fails or broker refuses connection
+
+Do **not** set a PEM passphrase when generating certificates. Mosquitto and Paho-MQTT expect unencrypted private keys; a passphrase-protected key will cause the TLS handshake to fail at startup. When generating with OpenSSL, omit the `-des3` (or equivalent) flag:
+
+```bash
+# Correct — no passphrase
+openssl genrsa -out client.key 2048
+
+# Wrong — passphrase-protected key will break the connection
+openssl genrsa -des3 -out client.key 2048
 ```
 
 ---
