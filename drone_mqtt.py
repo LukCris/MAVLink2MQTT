@@ -24,6 +24,7 @@ KEY_FILE = "./certs/client.key"
 
 TOPIC_CMD = f"uav/{UAV_ID}/cmd"
 TOPIC_ACK = f"uav/{UAV_ID}/ack"
+TOPIC_COMPLETED = f"uav/{UAV_ID}/completed"
 TOPIC_STATUS = f"uav/{UAV_ID}/status"
 TOPIC_TEL_ALT = f"uav/{UAV_ID}/telemetry/altitude"
 TOPIC_TEL_BAT = f"uav/{UAV_ID}/telemetry/battery"
@@ -41,6 +42,7 @@ HEARTBEAT_TIMEOUT = 10.0  # secondi prima di attivare il failsafe
 QOS_CMD = 1
 QOS_TEL = 0
 
+_qos_lock = threading.Lock()
 
 
 # --- Config SITL (il DRONE si connette al SITL) ---
@@ -129,7 +131,9 @@ def _ack(command_id: str | None, ok: bool, **extra):
     payload = {"ok": ok}
     if command_id: payload["command_id"] = command_id
     payload.update(extra)
-    mqtt_client.publish(TOPIC_ACK, json.dumps(payload), qos=1, retain=False)
+    with _qos_lock:
+        qos = QOS_CMD
+    mqtt_client.publish(TOPIC_ACK, json.dumps(payload), qos=qos, retain=False)
 
 
 def set_mode(mode: str):
@@ -319,32 +323,29 @@ def on_message(client, userdata, msg):
 
     try:
         p = json.loads(msg.payload.decode("utf-8"))
-        threading.Thread(
-            target=_handle_and_ack,
-            args=(p,),
-            daemon=True
-        ).start()
+        threading.Thread(target=_handle_and_ack, args=(p,), daemon=True).start()
     except Exception as e:
         print("[CMD] error:", e)
 
 
-# VALUTA DI INSERIRE L'ACK ACCEPTED DIRETTAMENTE IN HANDLE_COMMAND
 def _handle_and_ack(p: Dict[str, Any]):
+    global QOS_CMD
     cid = p.get("command_id")
-    t = str(p.get("type", "")).lower()
 
-    # Comandi bloccanti: ACK subito, poi esegui
-    ASYNC_CMDS = {"move", "velocity", "takeoff"}
+    # aggiorna QOS_CMD se specificato nel payload
+    if "qos" in p:
+        with _qos_lock:
+            QOS_CMD = int(p["qos"])
 
     try:
-        if t in ASYNC_CMDS:
-            _ack(cid, True, detail="accepted")  # ACK immediato alla GCS
-            ok, detail = handle_command(p)  # Esecuzione del comando bloccante
-            # Notifica completamento
-            _ack(cid, ok, detail="completed", **{k: v for k, v in detail.items() if k != "detail"})
-        else:
-            ok, detail = handle_command(p)
-            _ack(cid, ok, **detail)
+        _ack(cid, True, detail="accepted")   # ACK immediato per tutti
+        ok, detail = handle_command(p)
+        mqtt_client.publish(
+            TOPIC_COMPLETED,
+            json.dumps({"command_id": cid, "ok": ok, **detail}),
+            qos=QOS_CMD,
+            retain=False
+        )
     except Exception as e:
         _ack(cid, False, error=str(e))
 
