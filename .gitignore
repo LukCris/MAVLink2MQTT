@@ -8,6 +8,8 @@ __pycache__/
 .env
 .env*/
 *.logs/
+*.png
+*.jpeg
 
 .idea/
 "@ | Out-File -FilePath .gitignore -Encoding utf8 -NoNewline

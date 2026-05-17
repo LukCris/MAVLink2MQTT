@@ -20,6 +20,20 @@ IPERF_TCP_JSON = "iperf_tcp.json"
 IPERF_UDP_JSON = "iperf_udp_10M.json"
 WIFI_SNR_LOG = "wifi_snr.log"
 
+# ========================
+# AXIS RANGES
+# Valori fissi per confronto tra scenari.
+# ========================
+AXIS = {
+    "ping_rtt":        {"x": (0, 120),  "y": (0, 50)},      # ms
+    "mqtt_rtt":        {"x": (0, 120),  "y": (0, 500)},     # ms
+    "tcp_throughput":  {"x": (0, 30),   "y": (0, 100)},     # Mbps
+    "tcp_rtt":         {"x": (0, 30),   "y": (0, 50)},      # ms
+    "udp_throughput":  {"x": (0, 30),   "y": (0, 12)},      # Mbps
+    "snr":             {"x": (0, 120),  "y": (0, 80)},      # dB
+    "rssi":            {"x": (0, 120),  "y": (-90, -20)},   # dBm
+}
+
 
 def ensure_plots_dir(path: str):
     os.makedirs(path, exist_ok=True)
@@ -30,15 +44,6 @@ def ensure_plots_dir(path: str):
 # ========================
 
 def parse_ping_log(path: str) -> pd.DataFrame:
-    """
-    Parso un ping 'linux-style' con righe tipo:
-    [1764151009.354366] 64 bytes from 10.42.0.20: icmp_seq=1 ttl=64 time=0.418 ms
-    Restituisco un DataFrame con colonne:
-    - t_s (epoch del log, float)
-    - icmp_seq (int)
-    - rtt_ms (float)
-    - t_rel_s (tempo relativo al primo campione)
-    """
     pattern = re.compile(
         r"\[(?P<t_s>\d+\.\d+)\].*icmp_seq=(?P<seq>\d+).*time=(?P<rtt>\d+\.\d+)\s*ms"
     )
@@ -73,57 +78,33 @@ def plot_ping_rtt(df: pd.DataFrame, outdir: str, prefix: str = "ping"):
         print("[PING] RTT vuoti/non validi")
         return
 
-    # soglia solo per scalare l'asse (non visualizzata)
-    p95 = float(np.nanquantile(rtt, 0.95))
-
-    # limiti asse Y → grafico meno "stretto"
-    y_low = 0.0
-    y_high = max(1.0, p95 * 1.15)
-
     # =====================
     # RTT vs time
     # =====================
-    plt.figure(figsize=(10, 4.5))   # meno alto → più leggibile
-    plt.plot(
-        df["t_rel_s"],
-        df["rtt_ms"],
-        linewidth=1.6,
-        alpha=0.85
-    )
-
+    plt.figure(figsize=(10, 4.5))
+    plt.plot(df["t_rel_s"], df["rtt_ms"], linewidth=1.6, alpha=0.85)
     plt.xlabel("Time [s]")
     plt.ylabel("ICMP RTT [ms]")
     plt.title("ICMP RTT vs time")
     plt.grid(True)
-
-    plt.ylim(y_low, y_high)
-
+    plt.xlim(AXIS["ping_rtt"]["x"])
+    plt.ylim(AXIS["ping_rtt"]["y"])
     plt.tight_layout()
-    out_path = os.path.join(outdir, f"{prefix}_rtt_vs_time.png")
-    plt.savefig(out_path, dpi=300)
+    plt.savefig(os.path.join(outdir, f"{prefix}_rtt_vs_time.png"), dpi=300)
     plt.close()
 
     # =====================
     # RTT vs ICMP sequence
     # =====================
     plt.figure(figsize=(10, 4.5))
-    plt.plot(
-        df["icmp_seq"],
-        df["rtt_ms"],
-        linewidth=1.6,
-        alpha=0.85
-    )
-
+    plt.plot(df["icmp_seq"], df["rtt_ms"], linewidth=1.6, alpha=0.85)
     plt.xlabel("ICMP sequence")
     plt.ylabel("ICMP RTT [ms]")
     plt.title("ICMP RTT vs sequence")
     plt.grid(True)
-
-    plt.ylim(y_low, y_high)
-
+    plt.ylim(AXIS["ping_rtt"]["y"])
     plt.tight_layout()
-    out_path = os.path.join(outdir, f"{prefix}_rtt_vs_seq.png")
-    plt.savefig(out_path, dpi=300)
+    plt.savefig(os.path.join(outdir, f"{prefix}_rtt_vs_seq.png"), dpi=300)
     plt.close()
 
 
@@ -132,11 +113,6 @@ def plot_ping_rtt(df: pd.DataFrame, outdir: str, prefix: str = "ping"):
 # ========================
 
 def parse_latency_csv(path: str) -> pd.DataFrame:
-    """
-    latency_metrics.csv con header:
-    t_s,id,rtt_ms,lost
-    Restituisco anche t_rel_s.
-    """
     df = pd.read_csv(path)
     if df.empty:
         return df
@@ -155,7 +131,6 @@ def plot_latency(df: pd.DataFrame, outdir: str, prefix: str = "latency"):
     df = df.sort_values("t_s").reset_index(drop=True)
     df["t_rel_s"] = df["t_s"] - df["t_s"].iloc[0]
 
-    # forza tipi e normalizza: se lost=1 -> rtt_ms deve essere NaN
     df["lost"] = pd.to_numeric(df["lost"], errors="coerce").fillna(0).astype(int)
     df["rtt_ms"] = pd.to_numeric(df["rtt_ms"], errors="coerce")
     df.loc[df["lost"] == 1, "rtt_ms"] = np.nan
@@ -164,8 +139,6 @@ def plot_latency(df: pd.DataFrame, outdir: str, prefix: str = "latency"):
     rtt = df["rtt_ms"]
     lost_mask = df["lost"] == 1
 
-    # Serie interpolata SOLO per disegnare la linea continua (trend)
-    # (non modifica i punti raw)
     rtt_line = rtt.interpolate(method="linear", limit_area="inside")
 
     # =====================
@@ -173,34 +146,28 @@ def plot_latency(df: pd.DataFrame, outdir: str, prefix: str = "latency"):
     # =====================
     fig, ax = plt.subplots()
 
-    # linea continua (trend)
     ax.plot(t, rtt_line, linestyle="-", linewidth=2, alpha=0.9,
             label="trend (interp)", zorder=2)
 
-    # punti reali (solo quelli ricevuti)
     ok_mask = ~lost_mask & rtt.notna()
     ax.scatter(t[ok_mask], rtt[ok_mask], marker="o", s=35, alpha=0.9,
                label="received", zorder=3)
 
-    # evidenzia i loss: linee verticali + X in alto
     if lost_mask.any():
         for x in t[lost_mask]:
             ax.axvline(x, linestyle="--", linewidth=1, alpha=0.5)
-        # DOPO (corretto)
         ax.scatter(
             t[lost_mask],
             rtt_line[lost_mask],
-            marker="x",
-            s=80,
-            linewidths=3,
-            color="crimson",
-            label="lost",
-            zorder=10
+            marker="x", s=80, linewidths=3, color="crimson",
+            label="lost", zorder=10
         )
 
     ax.set_xlabel("Time [s]")
     ax.set_ylabel("Command RTT [ms]")
     ax.set_title("MQTT command latency vs time")
+    ax.set_xlim(AXIS["mqtt_rtt"]["x"])
+    ax.set_ylim(AXIS["mqtt_rtt"]["y"])
     ax.grid(True)
     ax.legend()
     fig.tight_layout()
@@ -211,7 +178,6 @@ def plot_latency(df: pd.DataFrame, outdir: str, prefix: str = "latency"):
     # SMOOTH (rolling)
     # =====================
     if len(df) >= 5:
-        # smooth sul trend (interp) così rimane continuo
         rtt_smooth = rtt_line.rolling(window=3, center=True, min_periods=1).mean()
 
         fig, ax = plt.subplots()
@@ -226,6 +192,8 @@ def plot_latency(df: pd.DataFrame, outdir: str, prefix: str = "latency"):
         ax.set_xlabel("Time [s]")
         ax.set_ylabel("Command RTT [ms]")
         ax.set_title("MQTT command latency (smoothed)")
+        ax.set_xlim(AXIS["mqtt_rtt"]["x"])
+        ax.set_ylim(AXIS["mqtt_rtt"]["y"])
         ax.grid(True)
         ax.legend()
         fig.tight_layout()
@@ -235,12 +203,12 @@ def plot_latency(df: pd.DataFrame, outdir: str, prefix: str = "latency"):
     # =====================
     # BOXPLOT
     # =====================
-    rtt = df["rtt_ms"].dropna()
-    n = len(rtt)
+    rtt_clean = df["rtt_ms"].dropna()
+    n = len(rtt_clean)
 
     plt.figure()
     plt.boxplot(
-        rtt,
+        rtt_clean,
         vert=True,
         widths=0.4,
         showfliers=True,
@@ -249,18 +217,14 @@ def plot_latency(df: pd.DataFrame, outdir: str, prefix: str = "latency"):
         whiskerprops=dict(linewidth=1.5),
         capprops=dict(linewidth=1.5),
     )
-
     plt.ylabel("Command RTT [ms]")
     plt.title(f"MQTT command latency (boxplot, n={n})")
-
-    # asse X inutile → lo rimuovo
     plt.xticks([])
-
+    # Applica solo asse Y al boxplot (asse X non significativo)
+    plt.ylim(AXIS["mqtt_rtt"]["y"])
     plt.grid(axis="y", linestyle="--", alpha=0.6)
     plt.tight_layout()
-
-    out_path = os.path.join(outdir, f"{prefix}_boxplot.png")
-    plt.savefig(out_path, dpi=300)
+    plt.savefig(os.path.join(outdir, f"{prefix}_boxplot.png"), dpi=300)
     plt.close()
 
 
@@ -269,14 +233,6 @@ def plot_latency(df: pd.DataFrame, outdir: str, prefix: str = "latency"):
 # ========================
 
 def parse_iperf_tcp(path: str):
-    """
-    Parso iperf_tcp.json (iperf3 --json).
-    Ritorno:
-      df_intervals: per intervallo con colonne:
-        start_s, end_s, seconds, bits_per_second, mbps,
-        rtt_ms, retransmits
-      summary: dict con throughput medio, retrans totali, RTT min/max/mean ecc.
-    """
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
 
@@ -290,29 +246,20 @@ def parse_iperf_tcp(path: str):
         bps = float(s["bits_per_second"])
         retrans = int(s.get("retransmits", 0))
 
-        # prendo i campi rtt dal primo stream, in µs
         stream = interval["streams"][0]
         rtt_us = stream.get("rtt", None)
-        if rtt_us is not None:
-            rtt_ms = float(rtt_us) / 1000.0
-        else:
-            rtt_ms = None
+        rtt_ms = float(rtt_us) / 1000.0 if rtt_us is not None else None
 
         inter_records.append(
             dict(
-                start_s=start,
-                end_s=end,
-                seconds=seconds,
-                bits_per_second=bps,
-                mbps=bps / 1e6,
-                rtt_ms=rtt_ms,
-                retransmits=retrans,
+                start_s=start, end_s=end, seconds=seconds,
+                bits_per_second=bps, mbps=bps / 1e6,
+                rtt_ms=rtt_ms, retransmits=retrans,
             )
         )
 
     df_intervals = pd.DataFrame(inter_records)
 
-    # summary dal blocco "end"
     end = data.get("end", {})
     sender = end.get("streams", [{}])[0].get("sender", {})
     summary = {
@@ -328,10 +275,6 @@ def parse_iperf_tcp(path: str):
 
     return df_intervals, summary
 
-
-import os
-import numpy as np
-import matplotlib.pyplot as plt
 
 def plot_iperf_tcp(df, summary, outdir, prefix="iperf_tcp"):
     if df.empty:
@@ -355,7 +298,6 @@ def plot_iperf_tcp(df, summary, outdir, prefix="iperf_tcp"):
     thr_p95 = float(thr.quantile(0.95))
 
     fig, ax = plt.subplots(figsize=(10, 6))
-
     ax.plot(t_mid, thr, linewidth=2.4, label="Throughput", color="#1f77b4")
     ax.axhline(thr_mean, linestyle="--", linewidth=1.8, color="0.3",
                label=f"Mean: {thr_mean:.1f} Mbps")
@@ -366,6 +308,8 @@ def plot_iperf_tcp(df, summary, outdir, prefix="iperf_tcp"):
 
     ax.set_xlabel("Time [s]")
     ax.set_ylabel("Throughput [Mbps]")
+    ax.set_xlim(AXIS["tcp_throughput"]["x"])
+    ax.set_ylim(AXIS["tcp_throughput"]["y"])
     ax.legend(loc="upper left", frameon=True, framealpha=0.9)
 
     fig.suptitle("TCP throughput vs time", fontsize=15, y=0.98)
@@ -390,7 +334,6 @@ def plot_iperf_tcp(df, summary, outdir, prefix="iperf_tcp"):
         spike_mask = rtt > rtt_p95
 
         fig, ax = plt.subplots(figsize=(10, 6))
-
         ax.plot(t_mid, rtt, linewidth=2.4, label="RTT", color="#1f77b4")
         ax.axhline(rtt_mean, linestyle="--", linewidth=1.8, color="0.3",
                    label=f"Mean: {rtt_mean:.1f} ms")
@@ -406,6 +349,8 @@ def plot_iperf_tcp(df, summary, outdir, prefix="iperf_tcp"):
 
         ax.set_xlabel("Time [s]")
         ax.set_ylabel("RTT [ms]")
+        ax.set_xlim(AXIS["tcp_throughput"]["x"])   # stessa finestra temporale del throughput
+        ax.set_ylim(AXIS["tcp_rtt"]["y"])
         ax.legend(loc="upper left", frameon=True, framealpha=0.9)
 
         fig.suptitle("TCP RTT (iperf) vs time", fontsize=15, y=0.98)
@@ -417,9 +362,6 @@ def plot_iperf_tcp(df, summary, outdir, prefix="iperf_tcp"):
             ha="center", va="top", fontsize=11
         )
 
-        if np.isfinite(rtt.max()):
-            ax.set_ylim(bottom=0, top=rtt.max() * 1.08)
-
         _prep_ax(ax)
         fig.tight_layout(rect=[0, 0, 1, 0.92])
         fig.savefig(os.path.join(outdir, f"{prefix}_rtt.png"), dpi=300)
@@ -428,48 +370,43 @@ def plot_iperf_tcp(df, summary, outdir, prefix="iperf_tcp"):
         # =====================
         # SCATTER: RTT vs Throughput
         # =====================
-        if df["rtt_ms"].notna().any():
-            thr = df["mbps"].astype(float).to_numpy()
-            rtt = df["rtt_ms"].astype(float).to_numpy()
+        thr_np = df["mbps"].astype(float).to_numpy()
+        rtt_np = df["rtt_ms"].astype(float).to_numpy()
 
-            # spike definito in modo non arbitrario (p95 RTT)
-            rtt_p95 = float(np.nanquantile(rtt, 0.95))
-            spike_mask = rtt > rtt_p95
+        rtt_p95_np = float(np.nanquantile(rtt_np, 0.95))
+        spike_mask_np = rtt_np > rtt_p95_np
 
-            # correlazione Pearson
-            valid = np.isfinite(thr) & np.isfinite(rtt)
-            pearson_r = np.corrcoef(thr[valid], rtt[valid])[0, 1]
+        valid = np.isfinite(thr_np) & np.isfinite(rtt_np)
+        pearson_r = np.corrcoef(thr_np[valid], rtt_np[valid])[0, 1]
 
-            fig, ax = plt.subplots(figsize=(10, 6))
+        fig, ax = plt.subplots(figsize=(10, 6))
+        ax.scatter(thr_np[~spike_mask_np], rtt_np[~spike_mask_np], s=60, alpha=0.85, label="samples")
 
-            # punti "normali"
-            ax.scatter(thr[~spike_mask], rtt[~spike_mask], s=60, alpha=0.85, label="samples")
+        if spike_mask_np.any():
+            ax.scatter(thr_np[spike_mask_np], rtt_np[spike_mask_np],
+                       marker="x", s=160, linewidths=3, color="crimson",
+                       label="RTT spike (>p95)", zorder=10)
 
-            # punti spike
-            if spike_mask.any():
-                ax.scatter(thr[spike_mask], rtt[spike_mask],
-                           marker="x", s=160, linewidths=3, color="crimson",
-                           label="RTT spike (>p95)", zorder=10)
+        ax.set_xlabel("Throughput [Mbps]")
+        ax.set_ylabel("RTT [ms]")
+        ax.set_xlim(AXIS["tcp_throughput"]["y"])   # X = throughput range
+        ax.set_ylim(AXIS["tcp_rtt"]["y"])
 
-            ax.set_xlabel("Throughput [Mbps]")
-            ax.set_ylabel("RTT [ms]")
+        fig.suptitle("RTT vs Throughput (iperf TCP)", fontsize=15, y=0.98)
+        fig.text(
+            0.5, 0.91,
+            f"Spike threshold: p95 RTT = {rtt_p95_np:.1f} ms | "
+            f"Pearson r = {pearson_r:.2f}",
+            ha="center", va="top", fontsize=11
+        )
 
-            fig.suptitle("RTT vs Throughput (iperf TCP)", fontsize=15, y=0.98)
-            fig.text(
-                0.5, 0.91,
-                f"Spike threshold: p95 RTT = {rtt_p95:.1f} ms | "
-                f"Pearson r = {pearson_r:.2f} (weak correlation)",
-                ha="center", va="top", fontsize=11
-            )
+        ax.set_axisbelow(True)
+        ax.grid(True, axis="both", linestyle="--", alpha=0.25)
+        ax.legend(loc="upper right", frameon=True, framealpha=0.9)
 
-            ax.set_axisbelow(True)
-            ax.grid(True, axis="both", linestyle="--", alpha=0.25)
-            ax.legend(loc="upper right", frameon=True, framealpha=0.9)
-
-            fig.tight_layout(rect=[0, 0, 1, 0.92])
-            out_path = os.path.join(outdir, f"{prefix}_rtt_vs_throughput.png")
-            fig.savefig(out_path, dpi=300)
-            plt.close(fig)
+        fig.tight_layout(rect=[0, 0, 1, 0.92])
+        fig.savefig(os.path.join(outdir, f"{prefix}_rtt_vs_throughput.png"), dpi=300)
+        plt.close(fig)
 
 
 # ========================
@@ -477,12 +414,6 @@ def plot_iperf_tcp(df, summary, outdir, prefix="iperf_tcp"):
 # ========================
 
 def parse_iperf_udp(path: str):
-    """
-    Parso iperf_udp.json.
-    Ritorno:
-      df_intervals: start_s, end_s, seconds, bits_per_second, mbps, packets
-      summary: dict con throughput, jitter, loss ecc.
-    """
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
 
@@ -498,19 +429,14 @@ def parse_iperf_udp(path: str):
 
         inter_records.append(
             dict(
-                start_s=start,
-                end_s=end,
-                seconds=seconds,
-                bits_per_second=bps,
-                mbps=bps / 1e6,
-                packets=packets,
+                start_s=start, end_s=end, seconds=seconds,
+                bits_per_second=bps, mbps=bps / 1e6, packets=packets,
             )
         )
 
     df_intervals = pd.DataFrame(inter_records)
 
     end = data.get("end", {})
-    # iperf3 UDP:  end["streams"][0]["udp"] + end["sum"]
     udp = end.get("streams", [{}])[0].get("udp", {})
     sum_ = end.get("sum", udp)
 
@@ -545,35 +471,25 @@ def plot_iperf_udp(df: pd.DataFrame, summary: dict, outdir: str, prefix: str = "
         f"jitter ≈ {summary['jitter_ms']:.3f} ms, "
         f"loss = {summary['lost_percent']:.2f}%"
     )
+    plt.xlim(AXIS["udp_throughput"]["x"])
+    plt.ylim(AXIS["udp_throughput"]["y"])
     plt.grid(True)
     plt.tight_layout()
-    out_path = os.path.join(outdir, f"{prefix}_throughput.png")
-    plt.savefig(out_path, dpi=300)
+    plt.savefig(os.path.join(outdir, f"{prefix}_throughput.png"), dpi=300)
     plt.close()
 
 
 # ========================
-# SNR
+# WIFI SNR
 # ========================
 
 def parse_wifi_snr_log(path: str) -> pd.DataFrame:
-    """
-    wifi_snr.log CSV-like:
-    ts,signal_dbm,noise_db,est_snr_db
-    1765988299.127822567,-38,-69,31
-    ...
-
-    Ritorna DF con:
-      ts (float), signal_dbm (float), noise_db (float), est_snr_db (float), t_rel_s (float)
-    """
     df = pd.read_csv(path)
 
-    # normalizza nomi (nel caso cambi)
     expected = {"ts", "signal_dbm", "noise_db", "est_snr_db"}
     if not expected.issubset(set(df.columns)):
         raise ValueError(f"[WIFI SNR] Colonne attese: {expected}, trovate: {set(df.columns)}")
 
-    # tipi
     for c in ["ts", "signal_dbm", "noise_db", "est_snr_db"]:
         df[c] = pd.to_numeric(df[c], errors="coerce")
 
@@ -596,18 +512,16 @@ def plot_wifi_snr(
         print("[WIFI SNR] Nessun dato da plottare")
         return
 
-    # --- palette soglie (DISTINTE) ---
-    # warn: arancione, bad: rosso (ben distinguibili)
     WARN_C = "#ff7f0e"
     BAD_C  = "#d62728"
 
     snr = df["est_snr_db"].astype(float)
     t = df["t_rel_s"].astype(float)
 
-    snr_min = float(np.nanmin(snr))
+    snr_min  = float(np.nanmin(snr))
     snr_mean = float(np.nanmean(snr))
-    snr_max = float(np.nanmax(snr))
-    snr_p95 = float(np.nanquantile(snr, 0.95))
+    snr_max  = float(np.nanmax(snr))
+    snr_p95  = float(np.nanquantile(snr, 0.95))
 
     def _prep_ax(ax):
         ax.set_axisbelow(True)
@@ -619,15 +533,11 @@ def plot_wifi_snr(
     # 1) SNR vs time
     # =========================
     fig, ax = plt.subplots(figsize=(10, 6))
-
     ax.plot(t, snr, linewidth=2.4, label="Estimated SNR")
-
-    # soglie con colori distinti
-    #ax.axhline(warn_db, linestyle="--", linewidth=2.0, color=WARN_C, label=f"warn {warn_db:.0f} dB")
-    #ax.axhline(bad_db,  linestyle="--", linewidth=2.0, color=BAD_C,  label=f"bad {bad_db:.0f} dB")
-
     ax.set_xlabel("Time [s]")
     ax.set_ylabel("Estimated SNR [dB]")
+    ax.set_xlim(AXIS["snr"]["x"])
+    ax.set_ylim(AXIS["snr"]["y"])
     ax.legend(loc="upper right", frameon=True, framealpha=0.9)
 
     fig.suptitle("WiFi estimated SNR vs time", fontsize=15, y=0.98)
@@ -650,82 +560,51 @@ def plot_wifi_snr(
 
     fig, ax = plt.subplots(figsize=(10, 6))
     ax.plot(x, y, linewidth=2.6, label="ECDF")
-
     ax.axvline(warn_db, linestyle="--", linewidth=2.0, color=WARN_C, label=f"warn {warn_db:.0f} dB")
     ax.axvline(bad_db,  linestyle="--", linewidth=2.0, color=BAD_C,  label=f"bad {bad_db:.0f} dB")
-
     ax.set_xlabel("Estimated SNR [dB]")
     ax.set_ylabel("ECDF")
     ax.set_title("WiFi SNR ECDF (cumulative distribution)", pad=10)
+    # Asse X dell'ECDF → stessa scala SNR
+    ax.set_xlim(AXIS["snr"]["y"])
     ax.legend(loc="lower right", frameon=True, framealpha=0.9)
-
     ax.set_axisbelow(True)
     ax.grid(True, axis="both", linestyle="--", alpha=0.25)
     ax.margins(x=0.02)
-
     fig.tight_layout()
     fig.savefig(os.path.join(outdir, f"{prefix}_snr_ecdf.png"), dpi=300)
     plt.close(fig)
 
     # =========================
-    # 3) Outage timeline (SOLO SE SERVE)
+    # 3) Outage timeline
     # =========================
     warn_mask = snr < warn_db
-    bad_mask = snr < bad_db
+    bad_mask  = snr < bad_db
 
     if warn_mask.any() or bad_mask.any():
         fig, ax = plt.subplots(figsize=(10, 3.2))
 
-        # visualizzazione “timeline”: 2 righe, punti dove succede
         if warn_mask.any():
-            ax.scatter(t[warn_mask], np.ones(warn_mask.sum()) * 1.0, s=25, color=WARN_C, label=f"warn < {warn_db:.0f} dB")
+            ax.scatter(t[warn_mask], np.ones(warn_mask.sum()) * 1.0,
+                       s=25, color=WARN_C, label=f"warn < {warn_db:.0f} dB")
         if bad_mask.any():
-            ax.scatter(t[bad_mask],  np.ones(bad_mask.sum())  * 0.0, s=25, color=BAD_C,  label=f"bad < {bad_db:.0f} dB")
+            ax.scatter(t[bad_mask],  np.ones(bad_mask.sum())  * 0.0,
+                       s=25, color=BAD_C,  label=f"bad < {bad_db:.0f} dB")
 
         ax.set_yticks([1.0, 0.0])
         ax.set_yticklabels([f"warn < {warn_db:.0f} dB", f"bad < {bad_db:.0f} dB"])
         ax.set_xlabel("Time [s]")
+        ax.set_xlim(AXIS["snr"]["x"])
         ax.set_title("WiFi SNR outage timeline", pad=10)
-
         ax.set_axisbelow(True)
         ax.grid(True, axis="x", linestyle="--", alpha=0.25)
         ax.grid(False, axis="y")
         ax.legend(loc="upper right", frameon=True, framealpha=0.9)
-
         fig.tight_layout()
         fig.savefig(os.path.join(outdir, f"{prefix}_snr_outage.png"), dpi=300)
         plt.close(fig)
     else:
         print("[WIFI SNR] Nessun campione sotto soglia: salto outage timeline.")
-
-    # =========================
-    # 4) Signal vs time (noise costante → non plottato)
-    # =========================
-    if "signal_dbm" in df.columns:
-        fig, ax = plt.subplots(figsize=(10, 6))
-
-        sig = df["signal_dbm"].astype(float)
-
-        ax.plot(t, sig, linewidth=2.4, label="Signal [dBm]", color="#1f77b4")
-
-        ax.set_xlabel("Time [s]")
-        ax.set_ylabel("Signal level [dBm]")
-        ax.set_title("WiFi signal level vs time", pad=10)
-
-        ymin = sig.min() - 3
-        ymax = sig.max() + 3
-        ax.set_ylim(ymin, ymax)
-
-        ax.legend(loc="best", frameon=True, framealpha=0.9)
-
-        ax.set_axisbelow(True)
-        ax.grid(True, axis="y", linestyle="--", alpha=0.35)
-        ax.grid(False, axis="x")
-        ax.margins(x=0.02)
-
-        fig.tight_layout()
-        fig.savefig(os.path.join(outdir, f"{prefix}_signal_vs_time.png"), dpi=300)
-        plt.close(fig)
 
 
 # ========================
@@ -771,8 +650,6 @@ def main():
     else:
         print(f"[IPERF UDP] File non trovato: {udp_path}")
 
-    print(f"Tutti i grafici (disponibili) sono stati salvati in: {PLOTS_DIR}")
-
     # --- WIFI SNR ---
     snr_path = os.path.join(LOG_DIR, WIFI_SNR_LOG)
     if os.path.exists(snr_path):
@@ -781,6 +658,8 @@ def main():
         plot_wifi_snr(df_snr, PLOTS_DIR, prefix="wifi_snr", warn_db=25.0, bad_db=20.0)
     else:
         print(f"[WIFI SNR] File non trovato: {snr_path}")
+
+    print(f"Tutti i grafici (disponibili) sono stati salvati in: {PLOTS_DIR}")
 
 
 if __name__ == "__main__":

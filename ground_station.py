@@ -336,12 +336,12 @@ PARAM / STATUS
 # ---------------------------
 def cli(c):
     global QOS_CMD
-    print("=== ArduPilot SITL Interactive CLI ===")
+    print("=== ArduPilot Interactive CLI ===")
     print(HELP)
 
     while True:
         try:
-            raw = input("sitl> ").strip()
+            raw = input("UAV> ").strip()
         except (EOFError, KeyboardInterrupt):
             print("\n[EXIT]")
             break

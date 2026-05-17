@@ -10,7 +10,6 @@ qos = input("QoS level used:")
 df_batt["t_s"] = pd.to_numeric(df_batt["t_s"], errors="coerce")
 df_batt["voltage_V"] = pd.to_numeric(df_batt["voltage_V"], errors="coerce")
 df_batt["current_A"] = pd.to_numeric(df_batt["current_A"], errors="coerce")
-df_batt["mAh_consumed"] = pd.to_numeric(df_batt["mAh_consumed"], errors="coerce")
 df_batt["remaining_pct"] = pd.to_numeric(df_batt["remaining_pct"], errors="coerce")
 
 # Elimina eventuali righe sporche (NaN)
@@ -39,16 +38,6 @@ plt.title(f"Battery Current Over Time with QoS {qos}")
 plt.grid(True)
 plt.tight_layout()
 plt.savefig("battery_current.png")
-
-# --- Plot 3: Battery mAh consumed ---
-plt.figure()
-plt.plot(df_batt["t_rel_s"], df_batt["mAh_consumed"])
-plt.xlabel("Time [s]")
-plt.ylabel("Energy Consumed [mAh]")
-plt.title(f"Battery Energy Consumption Over Time with QoS {qos}")
-plt.grid(True)
-plt.tight_layout()
-plt.savefig("battery_mAh.png")
 
 # --- Plot 4: Battery percentage ---
 plt.figure()

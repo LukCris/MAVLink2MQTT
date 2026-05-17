@@ -313,14 +313,6 @@ def on_message(client, userdata, msg):
         return
 
     # comandi JSON
-    """try:
-        p = json.loads(msg.payload.decode("utf-8"))
-        cid = p.get("command_id")
-        ok, detail = handle_command(p)
-        _ack(cid, ok, **detail)
-    except Exception as e:
-        print("[CMD] error:", e)"""
-
     try:
         p = json.loads(msg.payload.decode("utf-8"))
         threading.Thread(target=_handle_and_ack, args=(p,), daemon=True).start()

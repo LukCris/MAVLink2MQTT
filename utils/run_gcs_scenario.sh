@@ -4,12 +4,11 @@ set -euo pipefail
 # === CONFIG ===
 VENV_DIR="./.venv"
 
-# ./run_gcs_scenario.sh <name scenario> <IP Drone> <iface> <avg_noise>
+# ./run_gcs_scenario.sh <name scenario> <IP Drone> <iface>
 
 SCENARIO="${1:-}"
 DRONE_IP="${2:-}"
 IFACE="${3:-}"
-NOISE="${4:-}"
 
 if [ -z "$SCENARIO" ] || [ -z "$DRONE_IP" ]; then
   echo "Usage: $0 <scenario_name> <drone_ip> [wifi_iface]"
@@ -38,38 +37,6 @@ trap 'echo "[GCS] cleanup bg jobs"; kill 0 || true' EXIT
 
 # --- Ping ICMP ---
 ping "$DRONE_IP" -i 0.2 -D > "$ML2MQTT_LOG_DIR/ping_icmp.log" 2>&1 &
-
-(
-
-  OUT="$ML2MQTT_LOG_DIR/wifi_snr.log"
-
-  # header
-  echo "ts,signal_dbm,noise_db,est_snr_db" >> "$OUT"
-
-  while true; do
-    TS=$(date +%s.%N)
-
-    # Prendi RSSI dal lato AP (station dump)
-    SIG=$(iw dev "$IFACE" station dump 2>/dev/null | awk '
-      /signal avg:/ {print $3; exit}
-      /^signal:/ {print $2; exit}
-    ')
-
-    if [[ -z "$SIG" ]]; then
-      echo "$TS,,${NOISE:-},"
-      sleep 1
-      continue
-    fi
-
-    NOISE_VAL="${NOISE:--69}"
-
-    SNR=$(( SIG - NOISE_VAL ))
-    echo "$TS,$SIG,$NOISE_VAL,$SNR" >> "$OUT"
-
-    sleep 1
-  done
-) &
-
 
 # --- Avvia la GCS (CLI) in foreground ---
 python3 ground_station.py
