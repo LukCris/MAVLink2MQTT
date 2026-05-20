@@ -5,14 +5,11 @@ plot_heatmap.py
 Genera una radio heatmap sovrapposta alla planimetria del laboratorio.
 
 Workflow:
-1. Esegui collect_rssi.py durante il survey → rssi_survey.csv
+1. Esegui collect_rssi.py durante il survey → rssi_survey.wifi_csv
 2. Apri la planimetria in un editor (Preview, GIMP, ecc.) e annota
    le coordinate pixel (x, y) di ogni punto dove hai premuto INVIO
 3. Compila la lista SURVEY_POINTS qui sotto
 4. Esegui questo script
-
-Dipendenze:
-    pip install scipy matplotlib pillow numpy
 """
 
 import sys
@@ -29,7 +26,7 @@ from PIL import Image
 
 FLOORPLAN_PATH = "../planimetria.jpeg"       # planimetria del laboratorio
 SURVEY_CSV     = "../rssi_survey_2_4.csv"     # CSV prodotto da collect_rssi.py
-OUTPUT_PATH    = "../heatmap_radio_2_4.png"   # immagine di output
+OUTPUT_PATH    = "../heatmap_radio_2_4.png"  # immagine di output
 
 # Banda Wi-Fi — cambia per ogni scenario ("2.4 GHz" o "5 GHz")
 # Viene usata solo nel titolo del grafico
@@ -51,12 +48,13 @@ AP_POS = (127, 202)   # ← aggiorna con le coordinate reali
 # Esempio (DA SOSTITUIRE con i tuoi valori reali):
 SURVEY_POINTS: list[tuple[int, int]] = [
     (101,  642),   # mark #1
-    (82,  352),   # mark #2
-    (234,  352),   # mark #3
-    (405, 352),   # mark #4
-    (405, 238),   # mark #5
-    (234, 238),   # mark #6
-    (82, 238),   # mark #7
+    (101, 475),
+    (101,  352),
+    (234,  352),
+    (405, 352),
+    (405, 238),
+    (234, 238),
+    (101, 238),
 ]
 
 # Parametro dell'interpolazione RBF.

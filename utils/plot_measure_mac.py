@@ -59,7 +59,7 @@ def plot_rssi_noise_snr(df, outdir, prefix="mac_wifi"):
 
 def main():
     ensure_plots_dir(PLOTS_DIR)
-    path = os.path.join(LOG_DIR, "mac_rssi_noise.csv")
+    path = os.path.join(LOG_DIR, "mac_rssi_noise.wifi_csv")
     if os.path.exists(path):
         df = parse_mac_rssi(path)
         print(f"[MAC] Campioni: {len(df)}")

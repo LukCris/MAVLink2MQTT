@@ -11,27 +11,26 @@ import matplotlib.pyplot as plt
 # CONFIG
 # ========================
 
-LOG_DIR = "../logs/"          # cartella dove stanno i file di log
-PLOTS_DIR = "../4m_plots_QoS1"  # cartella di output per i PNG
+LOG_DIR = "../logs/dist-2m_tls-on_qos0"          # cartella dove stanno i file di log
+PLOTS_DIR = "../2m_plots_QoS0"  # cartella di output per i PNG
 
 PING_LOG = "ping_icmp.log"
 LATENCY_CSV = "latency_metrics.csv"
 IPERF_TCP_JSON = "iperf_tcp.json"
 IPERF_UDP_JSON = "iperf_udp_10M.json"
-WIFI_SNR_LOG = "wifi_snr.log"
+COMPLETION_CSV = "completion_metrics.csv"
 
 # ========================
 # AXIS RANGES
 # Valori fissi per confronto tra scenari.
 # ========================
 AXIS = {
-    "ping_rtt":        {"x": (0, 120),  "y": (0, 50)},      # ms
-    "mqtt_rtt":        {"x": (0, 120),  "y": (0, 500)},     # ms
-    "tcp_throughput":  {"x": (0, 30),   "y": (0, 100)},     # Mbps
-    "tcp_rtt":         {"x": (0, 30),   "y": (0, 50)},      # ms
-    "udp_throughput":  {"x": (0, 30),   "y": (0, 12)},      # Mbps
-    "snr":             {"x": (0, 120),  "y": (0, 80)},      # dB
-    "rssi":            {"x": (0, 120),  "y": (-90, -20)},   # dBm
+    "ping_rtt":        {"x": (-5, 155),  "y": (0, 110)},      # ms
+    "mqtt_rtt":        {"x": (-5, 105),  "y": (0, 800)},     # ms
+    "completion":      {"x": (-5, 105),  "y": (0, 6000)},
+    "tcp_throughput":  {"x": (0, 30),   "y": (0, 50)},     # Mbps
+    "tcp_rtt":         {"x": (-5, 90),   "y": (0, 500)},      # DA CANCELLARE
+    "udp_throughput":  {"x": (-5, 30),   "y": (0, 30)},      # Mbps
 }
 
 
@@ -480,131 +479,115 @@ def plot_iperf_udp(df: pd.DataFrame, summary: dict, outdir: str, prefix: str = "
 
 
 # ========================
-# WIFI SNR
+# MQTT COMPLETION CSV
 # ========================
 
-def parse_wifi_snr_log(path: str) -> pd.DataFrame:
+def parse_completion_csv(path: str) -> pd.DataFrame:
     df = pd.read_csv(path)
-
-    expected = {"ts", "signal_dbm", "noise_db", "est_snr_db"}
-    if not expected.issubset(set(df.columns)):
-        raise ValueError(f"[WIFI SNR] Colonne attese: {expected}, trovate: {set(df.columns)}")
-
-    for c in ["ts", "signal_dbm", "noise_db", "est_snr_db"]:
-        df[c] = pd.to_numeric(df[c], errors="coerce")
-
-    df = df.dropna(subset=["ts", "est_snr_db"]).sort_values("ts").reset_index(drop=True)
     if df.empty:
         return df
-
-    df["t_rel_s"] = df["ts"] - df["ts"].iloc[0]
+    df = df.sort_values("t_s").reset_index(drop=True)
+    df["t_rel_s"] = df["t_s"] - df["t_s"].iloc[0]
     return df
 
 
-def plot_wifi_snr(
-    df: pd.DataFrame,
-    outdir: str,
-    prefix: str = "wifi_snr",
-    warn_db: float = 25.0,
-    bad_db: float = 20.0
-):
+def plot_completion(df: pd.DataFrame, outdir: str, prefix: str = "completion"):
     if df.empty:
-        print("[WIFI SNR] Nessun dato da plottare")
+        print("[COMPLETION] Nessun dato da plottare")
         return
 
-    WARN_C = "#ff7f0e"
-    BAD_C  = "#d62728"
+    df = df.copy()
+    df = df.sort_values("t_s").reset_index(drop=True)
+    df["t_rel_s"] = df["t_s"] - df["t_s"].iloc[0]
 
-    snr = df["est_snr_db"].astype(float)
-    t = df["t_rel_s"].astype(float)
+    df["lost"] = pd.to_numeric(df["lost"], errors="coerce").fillna(0).astype(int)
+    df["rtt_ms"] = pd.to_numeric(df["rtt_ms"], errors="coerce")
+    df.loc[df["lost"] == 1, "rtt_ms"] = np.nan
 
-    snr_min  = float(np.nanmin(snr))
-    snr_mean = float(np.nanmean(snr))
-    snr_max  = float(np.nanmax(snr))
-    snr_p95  = float(np.nanquantile(snr, 0.95))
+    t = df["t_rel_s"]
+    rtt = df["rtt_ms"]
+    lost_mask = df["lost"] == 1
+    ok_mask = ~lost_mask & rtt.notna()
+    rtt_line = rtt.interpolate(method="linear", limit_area="inside")
 
-    def _prep_ax(ax):
-        ax.set_axisbelow(True)
-        ax.grid(True, axis="y", linestyle="--", alpha=0.35)
-        ax.grid(False, axis="x")
-        ax.margins(x=0.02)
+    # =====================
+    # LINEA + PUNTI + MARKER LOSS
+    # =====================
+    fig, ax = plt.subplots()
+    ax.plot(t, rtt_line, linestyle="-", linewidth=2, alpha=0.9,
+            label="trend (interp)", zorder=2)
+    ax.scatter(t[ok_mask], rtt[ok_mask], marker="o", s=35, alpha=0.9,
+               label="received", zorder=3)
 
-    # =========================
-    # 1) SNR vs time
-    # =========================
-    fig, ax = plt.subplots(figsize=(10, 6))
-    ax.plot(t, snr, linewidth=2.4, label="Estimated SNR")
+    if lost_mask.any():
+        for x in t[lost_mask]:
+            ax.axvline(x, linestyle="--", linewidth=1, alpha=0.5)
+        ax.scatter(t[lost_mask], rtt_line[lost_mask],
+                   marker="x", s=80, linewidths=3, color="crimson",
+                   label="lost", zorder=10)
+
     ax.set_xlabel("Time [s]")
-    ax.set_ylabel("Estimated SNR [dB]")
-    ax.set_xlim(AXIS["snr"]["x"])
-    ax.set_ylim(AXIS["snr"]["y"])
-    ax.legend(loc="upper right", frameon=True, framealpha=0.9)
-
-    fig.suptitle("WiFi estimated SNR vs time", fontsize=15, y=0.98)
-    fig.text(
-        0.5, 0.945,
-        f"min={snr_min:.1f} dB | mean={snr_mean:.1f} dB | max={snr_max:.1f} dB | p95={snr_p95:.1f} dB",
-        ha="center", va="top", fontsize=11
-    )
-
-    _prep_ax(ax)
-    fig.tight_layout(rect=[0, 0, 1, 0.92])
-    fig.savefig(os.path.join(outdir, f"{prefix}_snr_vs_time.png"), dpi=300)
-    plt.close(fig)
-
-    # =========================
-    # 2) ECDF
-    # =========================
-    x = np.sort(snr.dropna().to_numpy())
-    y = np.arange(1, len(x) + 1) / len(x)
-
-    fig, ax = plt.subplots(figsize=(10, 6))
-    ax.plot(x, y, linewidth=2.6, label="ECDF")
-    ax.axvline(warn_db, linestyle="--", linewidth=2.0, color=WARN_C, label=f"warn {warn_db:.0f} dB")
-    ax.axvline(bad_db,  linestyle="--", linewidth=2.0, color=BAD_C,  label=f"bad {bad_db:.0f} dB")
-    ax.set_xlabel("Estimated SNR [dB]")
-    ax.set_ylabel("ECDF")
-    ax.set_title("WiFi SNR ECDF (cumulative distribution)", pad=10)
-    # Asse X dell'ECDF → stessa scala SNR
-    ax.set_xlim(AXIS["snr"]["y"])
-    ax.legend(loc="lower right", frameon=True, framealpha=0.9)
-    ax.set_axisbelow(True)
-    ax.grid(True, axis="both", linestyle="--", alpha=0.25)
-    ax.margins(x=0.02)
+    ax.set_ylabel("Completion RTT [ms]")
+    ax.set_title("MQTT command completion latency vs time")
+    ax.set_xlim(AXIS["completion"]["x"])
+    ax.set_ylim(AXIS["completion"]["y"])
+    ax.grid(True)
+    ax.legend()
     fig.tight_layout()
-    fig.savefig(os.path.join(outdir, f"{prefix}_snr_ecdf.png"), dpi=300)
+    fig.savefig(os.path.join(outdir, f"{prefix}_rtt_vs_time_line.png"), dpi=300)
     plt.close(fig)
 
-    # =========================
-    # 3) Outage timeline
-    # =========================
-    warn_mask = snr < warn_db
-    bad_mask  = snr < bad_db
+    # =====================
+    # SMOOTH (rolling)
+    # =====================
+    if len(df) >= 5:
+        rtt_smooth = rtt_line.rolling(window=3, center=True, min_periods=1).mean()
 
-    if warn_mask.any() or bad_mask.any():
-        fig, ax = plt.subplots(figsize=(10, 3.2))
+        fig, ax = plt.subplots()
+        ax.plot(t, rtt_line, alpha=0.35, label="trend (interp)")
+        ax.scatter(t[ok_mask], rtt[ok_mask], alpha=0.6, label="received")
+        ax.plot(t, rtt_smooth, linewidth=2, color="crimson", label="moving avg (3)")
 
-        if warn_mask.any():
-            ax.scatter(t[warn_mask], np.ones(warn_mask.sum()) * 1.0,
-                       s=25, color=WARN_C, label=f"warn < {warn_db:.0f} dB")
-        if bad_mask.any():
-            ax.scatter(t[bad_mask],  np.ones(bad_mask.sum())  * 0.0,
-                       s=25, color=BAD_C,  label=f"bad < {bad_db:.0f} dB")
+        if lost_mask.any():
+            for x in t[lost_mask]:
+                ax.axvline(x, linestyle="--", linewidth=1, alpha=0.4)
 
-        ax.set_yticks([1.0, 0.0])
-        ax.set_yticklabels([f"warn < {warn_db:.0f} dB", f"bad < {bad_db:.0f} dB"])
         ax.set_xlabel("Time [s]")
-        ax.set_xlim(AXIS["snr"]["x"])
-        ax.set_title("WiFi SNR outage timeline", pad=10)
-        ax.set_axisbelow(True)
-        ax.grid(True, axis="x", linestyle="--", alpha=0.25)
-        ax.grid(False, axis="y")
-        ax.legend(loc="upper right", frameon=True, framealpha=0.9)
+        ax.set_ylabel("Completion RTT [ms]")
+        ax.set_title("MQTT command completion latency (smoothed)")
+        ax.set_xlim(AXIS["completion"]["x"])
+        ax.set_ylim(AXIS["completion"]["y"])
+        ax.grid(True)
+        ax.legend()
         fig.tight_layout()
-        fig.savefig(os.path.join(outdir, f"{prefix}_snr_outage.png"), dpi=300)
+        fig.savefig(os.path.join(outdir, f"{prefix}_rtt_smooth.png"), dpi=300)
         plt.close(fig)
-    else:
-        print("[WIFI SNR] Nessun campione sotto soglia: salto outage timeline.")
+
+    # =====================
+    # BOXPLOT
+    # =====================
+    rtt_clean = df["rtt_ms"].dropna()
+    n = len(rtt_clean)
+
+    plt.figure()
+    plt.boxplot(
+        rtt_clean,
+        vert=True,
+        widths=0.4,
+        showfliers=True,
+        medianprops=dict(linewidth=2),
+        boxprops=dict(linewidth=1.5),
+        whiskerprops=dict(linewidth=1.5),
+        capprops=dict(linewidth=1.5),
+    )
+    plt.ylabel("Completion RTT [ms]")
+    plt.title(f"MQTT command completion latency (boxplot, n={n})")
+    plt.xticks([])
+    plt.ylim(AXIS["completion"]["y"])
+    plt.grid(axis="y", linestyle="--", alpha=0.6)
+    plt.tight_layout()
+    plt.savefig(os.path.join(outdir, f"{prefix}_boxplot.png"), dpi=300)
+    plt.close()
 
 
 # ========================
@@ -650,14 +633,15 @@ def main():
     else:
         print(f"[IPERF UDP] File non trovato: {udp_path}")
 
-    # --- WIFI SNR ---
-    snr_path = os.path.join(LOG_DIR, WIFI_SNR_LOG)
-    if os.path.exists(snr_path):
-        df_snr = parse_wifi_snr_log(snr_path)
-        print(f"[WIFI SNR] Campioni: {len(df_snr)}")
-        plot_wifi_snr(df_snr, PLOTS_DIR, prefix="wifi_snr", warn_db=25.0, bad_db=20.0)
+    # --- MQTT completion ---
+    compl_path = os.path.join(LOG_DIR, COMPLETION_CSV)
+    if os.path.exists(compl_path):
+        df_compl = parse_completion_csv(compl_path)
+        print(f"[COMPLETION] Campioni: {len(df_compl)}")
+        plot_completion(df_compl, PLOTS_DIR)
     else:
-        print(f"[WIFI SNR] File non trovato: {snr_path}")
+        print(f"[COMPLETION] File non trovato: {compl_path}")
+
 
     print(f"Tutti i grafici (disponibili) sono stati salvati in: {PLOTS_DIR}")
 

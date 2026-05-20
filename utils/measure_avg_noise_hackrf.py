@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 import argparse
-import csv
 import subprocess
 import sys
 import time
@@ -149,7 +148,7 @@ def main():
                         help="Banda da osservare (2.4 o 5 GHz).")
     parser.add_argument("--duration", type=int, default=60,
                         help="Durata misura in secondi (default: 60).")
-    parser.add_argument("--outfile", default="noise_values.csv",
+    parser.add_argument("--outfile", default="noise_values.wifi_csv",
                         help="CSV di output (consigliato).")
     parser.add_argument("--noise-percentile", type=float, default=0.2,
                         help="Percentile per stimare il noise floor (0.2=20%%, default 0.2).")

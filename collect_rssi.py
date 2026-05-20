@@ -5,7 +5,7 @@ collect_rssi.py
 Campiona il RSSI via CoreWLAN (macOS) e salva su CSV.
 
 Utilizzo:
-    python3 collect_rssi.py --out rssi_survey.csv --interval 0.5
+    python3 collect_rssi.py --out rssi_survey.wifi_csv --interval 0.5
 
 Durante il survey:
     - Premi INVIO per marcare un "punto di misura" (registra la posizione corrente)
@@ -126,8 +126,8 @@ def run_survey(out_path: str, interval: float):
 
 def main():
     parser = argparse.ArgumentParser(description="Survey RSSI con CoreWLAN (macOS)")
-    parser.add_argument("--out",      default="rssi_survey.csv",
-                        help="File CSV di output (default: rssi_survey.csv)")
+    parser.add_argument("--out",      default="rssi_survey.wifi_csv",
+                        help="File CSV di output (default: rssi_survey.wifi_csv)")
     parser.add_argument("--interval", type=float, default=0.5,
                         help="Intervallo di campionamento in secondi (default: 0.5)")
     args = parser.parse_args()

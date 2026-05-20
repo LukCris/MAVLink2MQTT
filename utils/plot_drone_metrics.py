@@ -2,7 +2,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 # ---------- BATTERIA ----------
-df_batt = pd.read_csv("battery_metrics.csv")  # usa l'header già presente
+df_batt = pd.read_csv("battery_metrics.wifi_csv")  # usa l'header già presente
 
 qos = input("QoS level used:")
 

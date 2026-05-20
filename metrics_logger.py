@@ -2,10 +2,10 @@
 import csv, time
 from pathlib import Path
 
-METRICS_FILE = Path("battery_metrics.csv")
-LINK_FILE = Path("link_metrics.csv")
-LAT_FILE = Path("latency_metrics.csv")
-COMPLETION_FILE = Path("completion_metrics.csv")
+METRICS_FILE = Path("battery_metrics.wifi_csv")
+LINK_FILE = Path("link_metrics.wifi_csv")
+LAT_FILE = Path("latency_metrics.wifi_csv")
+COMPLETION_FILE = Path("completion_metrics.wifi_csv")
 
 # -----------------------------
 # Battery
