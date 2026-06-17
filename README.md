@@ -1,211 +1,290 @@
 # MAVLink2MQTT
-A lightweight communication bridge between an ArduPilot-based drone and a 
-Ground Control Station (GCS) over MQTT. Designed for experimental evaluation of 
-network parameters (latency, throughput, QoS, TLS overhead) in UAV command-and-control scenarios.
+A Python-based communication bridge that wraps MAVLink commands in structured MQTT messages, enabling secure, 
+bidirectional GCS–to–UAV communication over TLS-authenticated MQTT.
 
 ---
 
-## Architecture
+## Overview
 
-```
-┌──────────────────────────────────┐        Wi-Fi / TLS        ┌──────────────────────────────────┐
-│           DRONE SIDE             │ ◄───────────────────────► │           GCS SIDE               │
-│                                  │                           │                                  │
-│  ArduPilot / SITL                │        MQTT Broker        │  ground_station.py               │
-│        │                         │        (Mosquitto)        │    - Interactive CLI             │
-│  drone_mqtt.py                   │      port 8883 (TLS)      │    - Publishes commands          │
-│    - DroneKit bridge             │                           │    - Awaits ACKs                 │
-│    - Handles commands            │                           │    - Logs RTT latency            │
-│    - Publishes telemetry         │                           │    - Displays telemetry          │
-│    - Battery monitoring          │                           │                                  │
-└──────────────────────────────────┘                           └──────────────────────────────────┘
-```
+The system translates MAVLink commands (issued by a GCS operator via an interactive CLI) into JSON-encoded MQTT 
+messages, routes them through an Eclipse Mosquitto broker secured with mutual TLS, and dispatches them to an 
+ArduPilot-based flight controller via DroneKit on the companion computer. Telemetry data (altitude, battery, 
+autopilot status) is streamed back from drone to GCS over dedicated MQTT topics.
 
-### MQTT Topics
+A **two-ACK architecture** separates communication latency from execution latency: 
 
-| Topic | Direction | Description |
-|---|---|---|
-| `uav/{id}/cmd` | GCS → Drone | JSON command messages |
-| `uav/{id}/ack` | Drone → GCS | Command acknowledgements |
-| `uav/{id}/status` | Drone → GCS | Online / offline LWT |
-| `uav/{id}/telemetry/altitude` | Drone → GCS | Altitude during takeoff/landing |
-| `uav/{id}/telemetry/battery` | Drone → GCS | Voltage, current, level |
-| `uav/{id}/telemetry/sys` | Drone → GCS | ArduPilot STATUSTEXT forwarding |
-| `uav/{id}/mav/tx` | GCS → Drone | Raw MAVLink passthrough (base64) |
+- **Stage 1 — Immediate ACK** (`uav/{id}/ack`): published as soon as the drone bridge receives and accepts a command. 
+RTT measures pure MQTT network latency.
+- **Stage 2 — Completion notification** (`uav/{id}/completed`): published after the command has finished executing on 
+the autopilot. RTT measures MQTT latency + drone-side execution time.
+
+This gives two independent timing series from a single command exchange, logged to separate CSV files for analysis.
 
 ---
 
-## Features
-
-- **mTLS support**: mutual TLS authentication between drone, broker and GCS
-- **Configurable QoS**: switch between QoS 0, 1, 2 per-command at runtime
-- **Full command set**: mode, arm/disarm, takeoff, move, velocity, yaw, goto, speed, param get/set
-- **Telemetry streaming**: battery, altitude (during manoeuvres), autopilot status messages
-- **Latency metrics**: round-trip time logged for every command/ACK pair
-- **ArduPilot SITL compatible**: connect to a simulated vehicle for testing
-
----
-
-## Repository Structure
+## Repository structure
 
 ```
-.
-├── drone_mqtt.py               # Drone-side bridge (DroneKit ↔ MQTT)
-├── ground_station.py           # GCS interactive CLI
-├── metrics_logger.py           # Latency & battery CSV loggers
+MAVLink2MQTT/
 │
-└── utils/
-    ├── run_drone_scenario.sh   # Launch drone bridge with log dir
-    ├── run_gcs_scenario.sh     # Launch GCS + ping + RSSI logging
-    ├── run_iperf_scenario.sh   # Run iperf3 TCP + UDP tests
-    ├── plot_gcs_metrics.py     # Plot ping, MQTT latency, iperf results
-    ├── plot_drone_metrics.py   # Plot battery metrics
-    └── measure_avg_noise_hackrf.py  # RF noise floor via HackRF One
+├── drone_mqtt.py              # Drone-side MQTT bridge (DroneKit ↔ MQTT)
+├── ground_station.py          # GCS interactive CLI (MQTT client)
+├── metrics_logger.py          # CSV loggers for latency, completion, battery
+│
+├── utils/
+│   ├── collect_rssi.py        # RSSI survey tool (CoreWLAN, macOS only)
+│   ├── measure_avg_noise_hackrf.py  # Ambient noise floor via HackRF One
+│   ├── measure_mac_snr.py     # Continuous RSSI/noise/SNR logger (CoreWLAN)
+│   ├── plot_heatmap.py        # Wi-Fi RSSI heatmap over floor plan
+│   ├── plot_scenario.py       # CDF and throughput plots per QoS/distance
+│   ├── plot_wifi_summary.py   # RSSI/noise/SNR CDF plots per band
+│   ├── run_drone_scenario.sh  # Launch drone-side processes
+│   ├── run_gcs_scenario.sh    # Launch GCS-side processes
+│   └── run_iperf_scenario.sh  # Run iperf3 TCP/UDP bandwidth tests
+│
+├── certs/                     # TLS certificates (not committed)
+│   ├── ca.crt
+│   ├── client.crt / client.key   # GCS credentials
+│   └── drone.crt  / drone.key    # Drone credentials
+│
+└── logs/                      # Measurement output (auto-created, not committed)
+    └── dist-<d>_tls-on_qos<n>_<band>/
+        ├── latency_metrics.csv
+        ├── completion_metrics.csv
+        ├── battery_metrics.csv
+        ├── ping_icmp.log
+        ├── iperf_tcp.json
+        └── iperf_udp_10M.json
 ```
 
 ---
 
-## Requirements
+## MQTT Topic Structure
 
-### Drone side
-- Python 3.8+
-- `dronekit`
-- `paho-mqtt`
-- `pymavlink`
-- ArduPilot SITL (or real flight controller)
+| Topic | Direction | QoS | Content |
+|---|---|---|---|
+| `uav/{id}/cmd` | GCS → Drone | 0/1/2 | JSON command |
+| `uav/{id}/ack` | Drone → GCS | mirrored | Immediate acceptance ACK |
+| `uav/{id}/completed` | Drone → GCS | mirrored | Execution completion + result |
+| `uav/{id}/status` | Drone → GCS | 1 (retained) | `online` / `offline` (LWT) |
+| `uav/{id}/telemetry/altitude` | Drone → GCS | 0 | Altitude during climb/descent |
+| `uav/{id}/telemetry/battery` | Drone → GCS | 0 | Voltage, current, level |
+| `uav/{id}/telemetry/sys` | Drone → GCS | 0 | Autopilot STATUSTEXT messages |
+| `uav/{id}/heartbeat` | GCS → Drone | 0 | GCS liveness signal |
 
-### GCS side
-- Python 3.8+
-- `paho-mqtt`
+---
 
-### Analysis tools
-- `pandas`, `matplotlib`
-- `iperf3` (CLI)
-- `hackrf_sweep` (optional, for RF noise measurement)
+## Prerequisites
 
-Install Python dependencies:
-```bash
-pip install dronekit paho-mqtt pymavlink pandas matplotlib
+**GCS (Ubuntu / Linux)**
+
+```
+Python >= 3.10
+paho-mqtt
+Eclipse Mosquitto (broker, with mutual TLS configured)
+iperf3
+```
+
+**Drone / Companion Computer**
+
+```
+Python >= 3.10
+paho-mqtt
+dronekit
+pymavlink
+ArduPilot / SITL (for simulation)
+```
+
+**Optional (RF characterization)**
+
+```
+hackrf_sweep       (HackRF One, noise floor measurement)
+pyobjc / CoreWLAN  (macOS only — RSSI/noise collection and heatmap generation)
+iw                 (Linux — per-AP RSSI logging)
+```
+
+**Optional (RF characterization)**
+
+```
+hackrf_sweep   (HackRF One, noise floor measurement)
+pyobjc / CoreWLAN  (macOS only, RSSI and Noise collection, heatmap generation)
+iw             (Linux, per-AP RSSI logging)
 ```
 
 ---
 
-## Quick Start
+## Running a measurement scenario
 
-### 1. Drone side
+Each scenario is identified by a name encoding all experimental conditions:
 
-```bash
-# On the drone (or SITL machine)
-python3 drone_mqtt.py
+```
+dist-<distance>_tls-on_qos<level>_<band>
 ```
 
-Or use the scenario script:
+Example: `dist-5m_tls-on_qos1_2_4`
+
+### 1 — Start SITL (on the companion computer)
+
+```bash
+sim_vehicle.py -v ArduCopter --console --map
+```
+
+### 2 — Start the drone-side processes
+
 ```bash
 ./utils/run_drone_scenario.sh dist-5m_tls-on_qos1
 ```
 
-### 2. GCS side
+Starts the iperf3 server in the background and launches `drone_mqtt.py` in the foreground.
+
+### 3 — Start the GCS-side processes
 
 ```bash
-# On the ground station
-python3 ground_station.py
+./utils/run_gcs_scenario.sh dist-5m_tls-on_qos1_2_4 10.42.0.20 wlo1
 ```
 
-Or use the scenario script (includes automatic ping and RSSI logging):
+Starts ICMP ping logging in the background and launches the interactive GCS CLI in the foreground.
+
+### 4 — Run iperf bandwidth tests (separate terminal, GCS side)
+
 ```bash
-./utils/run_gcs_scenario.sh dist-5m_tls-on_qos1 10.42.0.20 wlo1 -85
+./utils/run_iperf_scenario.sh dist-4m_tls-on_qos1 10.42.0.20
 ```
 
-### 3. GCS CLI Commands
+Runs a 30 s TCP test followed by a 30 s UDP saturation test. 
+This is QoS-agnostic and only needs to be run once per distance/TLS configuration.
+
+
+---
+
+## GCS CLI Commands
 
 ```
-guided              # Switch to GUIDED mode
-arm                 # Arm the drone
-takeoff 10          # Take off to 10 m
-move north 3 20     # Move north at 3 m/s for 20 m
-yaw 90 30           # Rotate to heading 90° at 30°/s
-goto <lat> <lon> <alt>
-land
-rtl
-batt                # Query battery status
+guided [-q 0|1|2]                          # switch to GUIDED mode
+arm / disarm [-q 0|1|2]
+takeoff <alt_m> [-q 0|1|2]
+land / rtl [-q 0|1|2]
+
+move <north|south|east|west|up|down> <speed_mps> <distance_m> [-q 0|1|2]
+vel <vx> <vy> <vz> <duration_s> [-q 0|1|2]
+yaw <heading_deg> [rate=30] [relative=0|1] [cw=1|0] [-q 0|1|2]
+setspeed <mps> [-q 0|1|2]
+goto <lat> <lon> <alt_m> [-q 0|1|2]
+
+batt [-q 0|1|2]
+qos <0|1|2>                                
 ```
 
-Append `-q 0|1|2` to any command to override QoS for that specific message:
+The `-q` flag overrides the default QoS level for a single command. 
+The `qos` command changes the default for all subsequent commands in the session.
+
+---
+
+## RF measurement tools
+
+### Ambient noise floor (HackRF One)
+
+```bash
+python3 utils/measure_avg_noise_hackrf.py --band 2.4 --duration 60 --outfile noise_2.4.csv
+python3 utils/measure_avg_noise_hackrf.py --band 5   --duration 60 --outfile noise_5.csv
 ```
-takeoff 15 -q 0
-move east 2 10 -q 2
+
+Launches `hackrf_sweep` as a subprocess and estimates the noise floor using the 20th-percentile power bin across the sweep, averaged over the measurement window.
+
+### Continuous RSSI/SNR logger (macOS)
+
+```bash
+python3 utils/measure_mac_snr.py dist-5m_tls-on_qos1_2_4
+```
+
+Logs RSSI, noise floor, and SNR at 1 Hz to `logs/<scenario>/mac_rssi_noise.csv`. 
+
+> **Note:** on the 5 GHz band, macOS returns a fixed driver-level constant for the noise floor;
+> SNR values at 5 GHz are therefore not meaningful.
+
+### RSSI heatmap survey (macOS)
+
+```bash
+python3 utils/collect_rssi.py --out rssi_survey_2_4.csv --interval 0.5
+```
+
+Press **ENTER** at each physical measurement point to mark it. After the survey, annotate 
+the pixel coordinates of each mark on the floor plan image and fill in `SURVEY_POINTS` in 
+`plot_heatmap.py`, then run:
+
+```bash
+python3 utils/plot_heatmap.py
 ```
 
 ---
 
-## Network Testing
+## Generating plots
 
-### iperf3
-
-```bash
-./utils/run_iperf_scenario.sh dist-5m_tls-on_qos1 10.42.0.20
-```
-
-Runs a 30-second TCP test and a 30-second UDP test at 10 Mbps, saving results to `logs/<scenario>/`.
-
-### RF Noise Floor (HackRF)
+All plotting scripts read from the `logs/` directory and write PNGs to a configurable 
+output directory. Edit the `LOGS_DIR`, `OUT_DIR`, and `QOS` constants at the top of 
+each script before running.
 
 ```bash
-python3 utils/measure_avg_noise_hackrf.py --band 5 --duration 60 --outfile noise_5ghz.csv
-```
+# CDF and throughput comparison across distances (one figure per metric)
+python3 utils/plot_scenario.py
 
----
+# RSSI / noise / SNR CDFs from CoreWLAN data
+python3 utils/plot_wifi_summary.py
 
-## Metrics & Plots
-
-After a scenario run, generate all plots with:
-
-```bash
-python3 utils/plot_gcs_metrics.py
-```
-
-This produces PNG plots for:
-- ICMP RTT vs time and sequence number
-- MQTT command RTT (raw, smoothed, histogram, boxplot)
-- TCP throughput and RTT per interval
-- UDP throughput, jitter, and packet loss
-
-Battery plots:
-```bash
-python3 utils/plot_drone_metrics.py
-# (reads battery_metrics.csv from the current directory)
+# RSSI heatmap over floor plan
+python3 utils/plot_heatmap.py
 ```
 
 ---
 
-## TLS / Certificate Setup
+## Log file formats
 
-The broker and clients authenticate via mutual TLS. Expected certificate paths:
+| File | Columns |
+|---|---|
+| `latency_metrics.csv` | `t_s, id, rtt_ms, lost` — immediate ACK RTT |
+| `completion_metrics.csv` | `t_s, id, rtt_ms, lost` — execution completion RTT |
+| `battery_metrics.csv` | `t_s, voltage_V, current_A, remaining_pct, mAh_consumed` |
+| `ping_icmp.log` | Linux ping output with `-D` timestamps |
+| `iperf_tcp.json` | iperf3 JSON (TCP) |
+| `iperf_udp_10M.json` | iperf3 JSON (UDP) |
+| `mac_rssi_noise.csv` | `t_s, rssi_dbm, noise_dbm, snr_db` |
 
-| File | Drone | GCS |
-|---|---|---|
-| CA certificate | `/etc/mosquitto/ca_certificates/ca.crt` | `./certs/ca.crt` |
-| Client certificate | `/etc/mosquitto/certs/drone.crt` | `./certs/client.crt` |
-| Client key | `/etc/mosquitto/certs/drone.key` | `./certs/client.key` |
-
-Paths can be customised in the `CERT_*` variables at the top of each script.
-
-To disable TLS (e.g. for local SITL testing), set `USE_TLS = False` in both `drone_mqtt.py` and `ground_station.py`, and change `BROKER_PORT` to `1883`.
+In the latency and completion CSVs, `lost = 1` marks commands that timed out without 
+receiving an ACK; `rtt_ms` is empty for those rows.
 
 ---
 
-## Configuration
+## Key Design Decisions
 
-Key constants at the top of each file:
+**Two-ACK latency separation** — `drone_mqtt.py` sends an immediate `ack` message as soon as
+a command is received and parsed (measuring pure MQTT round-trip), and a separate completion 
+notification once DroneKit confirms execution. This allows the two latency components to be 
+stored and analyzed independently.
 
-| Variable | File | Description |
-|---|---|---|
-| `BROKER_HOST` | both | MQTT broker IP |
-| `BROKER_PORT` | both | 8883 (TLS) or 1883 |
-| `UAV_ID` | both | Drone identifier (namespaces topics) |
-| `SITL_LINK` | `drone_mqtt.py` | MAVLink connection string |
-| `QOS_CMD` | `ground_station.py` | Default command QoS level |
-| `LOG_DIR` | `plot_gcs_metrics.py` | Scenario log folder to plot |
+**Threaded command dispatch** — Commands that block the DroneKit event loop (e.g. `velocity`)
+are dispatched in separate threads via `_handle_and_ack()`, preventing MQTT callback starvation
+and broker disconnection during long-running maneuvers.
+
+**Last Will and Testament (LWT)** — The broker publishes `offline` on `uav/{id}/status` automatically
+if the drone client disconnects unexpectedly, enabling the GCS to detect link loss without polling.
+
+**QoS per command** — The `-q` flag in the CLI allows per-command QoS override without changing 
+the session default, facilitating comparative latency experiments at QoS 0, 1, and 2 without
+restarting the GCS.
+
+**Heartbeat watchdog** — A `heartbeat_watchdog` thread in `drone_mqtt.py` monitors GCS 
+liveness and triggers an emergency LAND mode if no heartbeat is received within 
+`HEARTBEAT_TIMEOUT` seconds. Currently disabled for SITL; should be enabled when transitioning
+to real-hardware flights.
+
+---
+
+## Known Limitations
+
+- The 5 GHz noise floor from CoreWLAN (`noiseMeasurement()`) is a fixed driver-level constant on macOS, not a
+  live measurement; SNR computed from it is not reliable at 5 GHz.
+- Experimental validation is based on SITL and a controlled laboratory Wi-Fi environment; results may differ
+  under outdoor or multi-path propagation conditions.
 
 ---
 
@@ -213,7 +292,7 @@ Key constants at the top of each file:
 
 ### `ModuleNotFoundError: No module named 'past'`
 
-DroneKit depends on the `future` package, which provides the `past` module. If you see this error on import, install it explicitly:
+DroneKit depends on the `future` package, which provides the `past` module. Install it explicitly:
 
 ```bash
 pip install future
@@ -221,21 +300,21 @@ pip install future
 
 ### `TypeError: metaclass conflict` or `MutableMapping` error in DroneKit
 
-Python 3.10+ removed several aliases from `collections` that DroneKit relies on. Open DroneKit's `__init__.py` (usually at `<venv>/lib/pythonX.Y/site-packages/dronekit/__init__.py`) and update the `Parameters` class declaration from:
+Python 3.10+ removed several aliases from `collections` that DroneKit relies on. Open DroneKit's `__init__.py`
+(usually at `<venv>/lib/pythonX.Y/site-packages/dronekit/__init__.py`) and update the `Parameters` class
+declaration:
 
 ```python
+# Before
 class Parameters(collections.MutableMapping, HasObservers):
-```
 
-to:
-
-```python
+# After
 class Parameters(collections.abc.MutableMapping, HasObservers):
 ```
 
 ### `SerialException` on vehicle connect
 
-DroneKit requires `pyserial` to handle serial connections. If you get a `SerialException` even when connecting over UDP/TCP, install it explicitly:
+DroneKit requires `pyserial` even when connecting over UDP/TCP. Install it explicitly:
 
 ```bash
 pip install pyserial
@@ -243,7 +322,8 @@ pip install pyserial
 
 ### TLS handshake fails or broker refuses connection
 
-Do **not** set a PEM passphrase when generating certificates. Mosquitto and Paho-MQTT expect unencrypted private keys; a passphrase-protected key will cause the TLS handshake to fail at startup. When generating with OpenSSL, omit the `-des3` (or equivalent) flag:
+Do **not** set a PEM passphrase when generating certificates. Mosquitto and Paho-MQTT expect unencrypted
+private keys; a passphrase-protected key will cause the TLS handshake to fail at startup.
 
 ```bash
 # Correct — no passphrase
@@ -257,4 +337,4 @@ openssl genrsa -des3 -out client.key 2048
 
 ## License
 
-MIT — see `LICENSE` for details.
+This project is released for academic purposes. See `LICENSE` for details.
